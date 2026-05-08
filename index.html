@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KeepPoint</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>KeepPoint</h1>
+        <p>열자마자 바로 이어서 읽게 만든다</p>
+      </div>
+      <div class="profile-chip" id="profileName">박경모</div>
+    </header>
+
+    <section class="tabs-wrap">
+      <div id="categoryTabs" class="tabs"></div>
+      <div class="tabs-actions">
+        <button id="addCategoryBtn" class="btn ghost">카테고리 추가</button>
+        <button id="deleteCategoryBtn" class="btn danger ghost">선택 카테고리 삭제</button>
+      </div>
+    </section>
+
+    <main class="layout">
+      <section class="panel middle">
+        <h2>최근 읽던 것</h2>
+        <ol id="recentList" class="recent-list"></ol>
+
+        <div class="quick-add">
+          <label for="quickAddInput">빠른 링크 추가</label>
+          <input id="quickAddInput" placeholder="링크 붙여넣고 Enter..." />
+        </div>
+
+        <div class="section-header">
+          <h2 id="currentCategoryTitle">링크 목록</h2>
+        </div>
+        <ul id="linkList" class="list"></ul>
+      </section>
+
+      <section class="panel right">
+        <div class="section-header">
+          <h2>링크 상세</h2>
+        </div>
+        <article id="detailView" class="detail empty">
+          링크를 선택하면 상세 내용이 표시됩니다.
+        </article>
+      </section>
+    </main>
+
+    <dialog id="categoryModal">
+      <form method="dialog" id="categoryForm">
+        <h3>카테고리 추가</h3>
+        <label>
+          이름
+          <input id="categoryNameInput" required maxlength="30" />
+        </label>
+        <menu>
+          <button value="cancel">취소</button>
+          <button id="saveCategoryBtn" value="default">완료</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

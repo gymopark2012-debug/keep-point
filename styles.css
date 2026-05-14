@@ -218,6 +218,23 @@ form { display: flex; flex-direction: column; gap: 10px; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 14px; }
 menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 8px 0 0; }
 
+.resume-card {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #e3e8f4;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.resume-card .meta {
+  margin: 0;
+}
+.resume-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 @media (max-width: 960px) {
   .layout { grid-template-columns: 1fr; height: auto; }
 }

@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF 검증</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        padding: 10px 16px;
+        background: #020617;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .toolbar {
+        padding: 8px 16px;
+        background: #1e293b;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .pv-scroll {
+        flex: 1;
+        overflow: auto;
+        display: flex;
+        justify-content: center;
+        padding: 16px;
+      }
+      canvas {
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        max-width: 100%;
+      }
+      .btn {
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 1px solid #3b82f6;
+        background: #2563eb;
+        color: #fff;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .btn.ghost {
+        background: transparent;
+        border-color: #64748b;
+        color: #e2e8f0;
+      }
+      #pageInfo {
+        font-size: 14px;
+        min-width: 100px;
+      }
+      #err {
+        display: none;
+        margin: 0;
+        padding: 12px 16px;
+        background: #7f1d1d;
+        color: #fecaca;
+      }
+      #err.show {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a class="btn ghost" href="./index.html">← 목록</a>
+      <span id="titleBar">PDF 검증</span>
+    </header>
+    <div class="toolbar">
+      <button type="button" class="btn" id="prevBtn">이전 페이지</button>
+      <span id="pageInfo">- / -</span>
+      <button type="button" class="btn" id="nextBtn">다음 페이지</button>
+    </div>
+    <div class="pv-scroll">
+      <canvas id="c"></canvas>
+    </div>
+    <p id="err"></p>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+      (() => {
+        const WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        const param = new URLSearchParams(location.search).get("url");
+        const pdfUrlParam = param ? String(param).trim() : "";
+        const pdfSrc = pdfUrlParam ? new URL(pdfUrlParam, location.href).href : "";
+        const storageKey = () => "keepPoint_verify_pdf_" + encodeURIComponent(pdfUrlParam || pdfSrc);
+
+        const prevBtn = document.getElementById("prevBtn");
+        const nextBtn = document.getElementById("nextBtn");
+        const pageInfo = document.getElementById("pageInfo");
+        const canvas = document.getElementById("c");
+        const errEl = document.getElementById("err");
+
+        console.log("[verify PDF] PDF URL (resolved)", pdfSrc || "(없음)");
+
+        function showErr(msg) {
+          errEl.textContent = msg;
+          errEl.classList.add("show");
+        }
+
+        function loadSavedPageNumber() {
+          try {
+            const raw = localStorage.getItem(storageKey());
+            if (!raw) return 1;
+            const o = JSON.parse(raw);
+            const n = parseInt(String(o.pageNumber), 10);
+            const p = Number.isFinite(n) && n >= 1 ? n : 1;
+            console.log("[verify PDF] 복원된 페이지 번호", p, "(storage key)", storageKey());
+            return p;
+          } catch (e) {
+            console.log("[verify PDF] 복원 실패, 1페이지부터", e);
+            return 1;
+          }
+        }
+
+        function savePageNumber(n) {
+          const payload = { pageNumber: n, url: pdfUrlParam, savedAt: new Date().toISOString() };
+          localStorage.setItem(storageKey(), JSON.stringify(payload));
+          console.log("[verify PDF] 현재 페이지 저장 여부: 저장됨", n);
+        }
+
+        if (!pdfUrlParam || !pdfUrlParam.split(/[?#]/)[0].toLowerCase().endsWith(".pdf")) {
+          showErr("?url= 이 .pdf 로 끝나야 합니다. 예: pdf-viewer.html?url=sample.pdf");
+          return;
+        }
+
+        if (typeof pdfjsLib === "undefined") {
+          showErr("PDF.js 로드 실패");
+          return;
+        }
+        pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER;
+
+        let pdfDoc = null;
+        let totalPages = 0;
+        let currentPage = loadSavedPageNumber();
+
+        async function render() {
+          if (!pdfDoc) return;
+          currentPage = Math.min(Math.max(1, currentPage), totalPages);
+          const page = await pdfDoc.getPage(currentPage);
+          const vp = page.getViewport({ scale: 1.25 });
+          const ctx = canvas.getContext("2d");
+          canvas.height = vp.height;
+          canvas.width = vp.width;
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+          pageInfo.textContent = currentPage + " / " + totalPages;
+          savePageNumber(currentPage);
+        }
+
+        prevBtn.addEventListener("click", async () => {
+          if (currentPage <= 1) return;
+          currentPage--;
+          await render();
+        });
+        nextBtn.addEventListener("click", async () => {
+          if (currentPage >= totalPages) return;
+          currentPage++;
+          await render();
+        });
+
+        const task = pdfjsLib.getDocument({ url: pdfSrc, withCredentials: false, disableRange: true, disableStream: true });
+        task.promise
+          .then(async (doc) => {
+            pdfDoc = doc;
+            totalPages = doc.numPages;
+            console.log("[verify PDF] PDF 로딩 성공 여부: 성공, 전체 페이지 수", totalPages);
+            document.getElementById("titleBar").textContent = "PDF 검증 · " + totalPages + " 페이지";
+            currentPage = Math.min(Math.max(1, currentPage), totalPages);
+            await render();
+          })
+          .catch((e) => {
+            console.log("[verify PDF] PDF 로딩 성공 여부: 실패", e);
+            showErr(String(e && e.message ? e.message : e));
+          });
+      })();
+    </script>
+  </body>
+</html>

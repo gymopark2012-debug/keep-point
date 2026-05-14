@@ -1,6 +1,19 @@
 const STORAGE_KEY = "keepPointDataV2";
 const ALL_CATEGORY = "all";
 
+function getPdfReadingStorageKey(linkUrl) {
+  return `keepPoint_pdf_reading_${encodeURIComponent(linkUrl || "")}`;
+}
+
+function getPdfSnapshotFromStorage(linkUrl) {
+  try {
+    const raw = localStorage.getItem(getPdfReadingStorageKey(linkUrl));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 const defaultData = {
   profile: { name: "박경모" },
   categories: [
@@ -25,6 +38,15 @@ const defaultData = {
       tags: ["검색"],
       description: "나중에 참고할 검색 링크",
       lastVisitedAt: "2025-02-05T12:00:00.000Z"
+    },
+    {
+      id: "l3",
+      categoryId: "c1",
+      title: "샘플 PDF",
+      url: "sample.pdf",
+      tags: ["데모"],
+      description: "PDF 링크는 내부 뷰어에서 열 수 있습니다.",
+      lastVisitedAt: "2025-02-05T14:00:00.000Z"
     }
   ],
   ui: {
@@ -40,6 +62,7 @@ normalizeState();
 const autoSaveTimers = new Map();
 const readPositionTimers = new Map();
 const runtimeSaveStatus = {};
+let teardownDetailView = () => {};
 
 const categoryTabs = document.getElementById("categoryTabs");
 const recentList = document.getElementById("recentList");
@@ -174,6 +197,7 @@ function renderLinks() {
       <div class="meta">📍 마지막 위치: ${relativeTime(link.lastVisitedAt)}</div>
       <div class="preview">${escapeHtml(shortText(link.description || "설명 없음", 65))}</div>
       <div class="hover-actions">
+        <button class="btn" data-action="read">읽기</button>
         <button class="btn ghost" data-action="share">공유</button>
         <button class="btn danger" data-action="delete">삭제</button>
       </div>
@@ -181,6 +205,11 @@ function renderLinks() {
 
     li.addEventListener("click", (event) => {
       const action = event.target?.dataset?.action;
+      if (action === "read") {
+        event.stopPropagation();
+        openLinkForReading(link);
+        return;
+      }
       if (action === "share") {
         event.stopPropagation();
         shareLink(link.id);
@@ -198,17 +227,40 @@ function renderLinks() {
 }
 
 function renderDetail() {
+  teardownDetailView();
   const link = state.links.find((item) => item.id === state.ui.selectedLinkId);
   if (!link) {
     detailView.classList.add("empty");
     detailView.textContent = "링크가 없습니다. 링크를 붙여넣어 바로 추가해 보세요.";
+    teardownDetailView = () => {};
     return;
   }
 
   detailView.classList.remove("empty");
+  const isPdf = isPdfUrl(link.url);
+  const pdfSnap = isPdf ? getPdfSnapshotFromStorage(link.url) : null;
   const savedReadPosition = getReadPosition(link.id);
   const readPercent = savedReadPosition.scrollProgress;
   const saveStatusText = runtimeSaveStatus[link.id] || "저장됨";
+
+  const pdfPageLine =
+    pdfSnap && pdfSnap.pageNumber != null ? `마지막 페이지: ${pdfSnap.pageNumber}` : "저장된 페이지 없음";
+
+  const readCardHtml = isPdf
+    ? `<div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
+    : `<div class="resume-card"><strong>웹사이트</strong><p class="meta" style="margin:6px 0 0;">먼저 iframe 내부 뷰어로 열고, 막히면 새 탭으로 열 수 있습니다. (실제 사이트 스크롤 저장은 Chrome 확장에서 할 수 있습니다.)</p><div class="resume-actions"><button type="button" class="btn" id="openWebViewerBtn">내부 뷰어에서 열기</button><button type="button" class="btn ghost" id="openWebNewTabBtn">새 탭에서 열기</button></div></div>`;
+
+  const readingBlock = !isPdf
+    ? `<section>
+      <h4>읽기 보기 (메모 안)</h4>
+      <div class="reading-wrap">
+        <div id="readingSurface" class="reading-surface">${escapeHtml(link.description || "설명 없음")}</div>
+        <div class="reading-cursor" aria-hidden="true">현재 읽는 위치</div>
+      </div>
+      <div id="readingFocusText" class="reading-focus-text"></div>
+    </section>
+    <div id="readMarker" class="read-marker">── 여기까지 읽음 ── ${readPercent}%</div>`
+    : `<p class="meta">PDF는 <strong>읽기</strong> 또는 위의 <strong>PDF 뷰어에서 열기</strong>로 확인하세요.</p>`;
 
   detailView.innerHTML = `
     <div class="hover-actions">
@@ -217,6 +269,7 @@ function renderDetail() {
     </div>
     <h3>${escapeHtml(link.title)}</h3>
     <a href="${escapeAttr(link.url)}" target="_blank" rel="noreferrer">원문 링크</a>
+    ${readCardHtml}
     <div class="save-row">
       <span id="saveStatus" class="save-status">${escapeHtml(saveStatusText)}</span>
     </div>
@@ -230,16 +283,8 @@ function renderDetail() {
       설명
       <textarea id="editDescInput" rows="5">${escapeHtml(link.description || "")}</textarea>
     </label>
-    <section>
-      <h4>읽기 보기</h4>
-      <div class="reading-wrap">
-        <div id="readingSurface" class="reading-surface">${escapeHtml(link.description || "설명 없음")}</div>
-        <div class="reading-cursor" aria-hidden="true">현재 읽는 위치</div>
-      </div>
-      <div id="readingFocusText" class="reading-focus-text"></div>
-    </section>
-    <div id="readMarker" class="read-marker">── 여기까지 읽음 ── ${readPercent}%</div>
-    <div class="meta">📍 마지막 위치: ${relativeTime(link.lastVisitedAt)}</div>
+    ${readingBlock}
+    <div class="meta">📍 마지막 방문: ${relativeTime(link.lastVisitedAt)}</div>
   `;
 
   const statusEl = document.getElementById("saveStatus");
@@ -250,6 +295,11 @@ function renderDetail() {
   const readMarkerEl = document.getElementById("readMarker");
   const readingSurface = document.getElementById("readingSurface");
   const readingFocusTextEl = document.getElementById("readingFocusText");
+  const openPdfBtn = document.getElementById("openPdfBtn");
+  const restartPdfBtn = document.getElementById("restartPdfBtn");
+  const clearPdfBtn = document.getElementById("clearPdfBtn");
+  const openWebViewerBtn = document.getElementById("openWebViewerBtn");
+  const openWebNewTabBtn = document.getElementById("openWebNewTabBtn");
   let draftDesc = link.description || "";
   let draftTags = [...link.tags];
 
@@ -324,16 +374,20 @@ function renderDetail() {
   };
 
   renderTagEditor();
-  descInput.addEventListener("input", () => {
+
+  const onDescInput = () => {
     draftDesc = descInput.value;
     scheduleAutoSave();
-  });
-  newTagInput.addEventListener("keydown", (event) => {
+  };
+  descInput.addEventListener("input", onDescInput);
+
+  const onNewTagKeydown = (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
     addTag(newTagInput.value);
     newTagInput.value = "";
-  });
+  };
+  newTagInput.addEventListener("keydown", onNewTagKeydown);
 
   const restoreReadPosition = (behavior) => {
     if (!readingSurface) return;
@@ -354,23 +408,80 @@ function renderDetail() {
     readingFocusTextEl.textContent = `읽는 부분: ...${preview}...`;
   };
 
-  requestAnimationFrame(() => restoreReadPosition(savedReadPosition.scrollY > 0 ? "smooth" : "auto"));
-  requestAnimationFrame(() => updateReadingDisplay(savedReadPosition));
+  let onReadingScroll = null;
+  if (readingSurface) {
+    requestAnimationFrame(() => restoreReadPosition(savedReadPosition.scrollY > 0 ? "smooth" : "auto"));
+    requestAnimationFrame(() => updateReadingDisplay(savedReadPosition));
 
-  readingSurface.addEventListener("scroll", () => {
-    const livePosition = getReadPositionFromElement(readingSurface);
-    updateReadingDisplay(livePosition);
+    onReadingScroll = () => {
+      const livePosition = getReadPositionFromElement(readingSurface);
+      updateReadingDisplay(livePosition);
+      clearTimeout(readPositionTimers.get(link.id));
+      const timer = setTimeout(() => {
+        const nextPosition = saveReadPosition(link.id, readingSurface);
+        updateReadingDisplay(nextPosition);
+      }, 1000);
+      readPositionTimers.set(link.id, timer);
+    };
+    readingSurface.addEventListener("scroll", onReadingScroll, { passive: true });
+  }
 
+  const onOpenPdfClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openPdfViewer(link.id, false);
+  };
+  const onRestartPdfClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openPdfViewer(link.id, true);
+  };
+  const onClearPdfClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    localStorage.removeItem(getPdfReadingStorageKey(link.url));
+    saveAndRender();
+  };
+  const onOpenWebViewerClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    window.location.href = webViewerPageUrl(link.url);
+  };
+  const onOpenWebNewTabClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(link.url, "_blank", "noopener,noreferrer");
+  };
+
+  if (openPdfBtn) openPdfBtn.addEventListener("click", onOpenPdfClick);
+  if (restartPdfBtn) restartPdfBtn.addEventListener("click", onRestartPdfClick);
+  if (clearPdfBtn) clearPdfBtn.addEventListener("click", onClearPdfClick);
+  if (openWebViewerBtn) openWebViewerBtn.addEventListener("click", onOpenWebViewerClick);
+  if (openWebNewTabBtn) openWebNewTabBtn.addEventListener("click", onOpenWebNewTabClick);
+
+  const onShareClick = () => shareLink(link.id);
+  const onDeleteClick = () => deleteLink(link.id);
+  const shareCurrentBtn = document.getElementById("shareCurrentBtn");
+  const deleteCurrentBtn = document.getElementById("deleteCurrentBtn");
+  shareCurrentBtn.addEventListener("click", onShareClick);
+  deleteCurrentBtn.addEventListener("click", onDeleteClick);
+
+  teardownDetailView = () => {
+    clearTimeout(autoSaveTimers.get(link.id));
     clearTimeout(readPositionTimers.get(link.id));
-    const timer = setTimeout(() => {
-      const nextPosition = saveReadPosition(link.id, readingSurface);
-      updateReadingDisplay(nextPosition);
-    }, 1000);
-    readPositionTimers.set(link.id, timer);
-  });
-
-  document.getElementById("shareCurrentBtn").addEventListener("click", () => shareLink(link.id));
-  document.getElementById("deleteCurrentBtn").addEventListener("click", () => deleteLink(link.id));
+    descInput.removeEventListener("input", onDescInput);
+    newTagInput.removeEventListener("keydown", onNewTagKeydown);
+    if (readingSurface && onReadingScroll) {
+      readingSurface.removeEventListener("scroll", onReadingScroll);
+    }
+    if (openPdfBtn) openPdfBtn.removeEventListener("click", onOpenPdfClick);
+    if (restartPdfBtn) restartPdfBtn.removeEventListener("click", onRestartPdfClick);
+    if (clearPdfBtn) clearPdfBtn.removeEventListener("click", onClearPdfClick);
+    if (openWebViewerBtn) openWebViewerBtn.removeEventListener("click", onOpenWebViewerClick);
+    if (openWebNewTabBtn) openWebNewTabBtn.removeEventListener("click", onOpenWebNewTabClick);
+    shareCurrentBtn.removeEventListener("click", onShareClick);
+    deleteCurrentBtn.removeEventListener("click", onDeleteClick);
+  };
 }
 
 function selectLink(linkId) {
@@ -404,6 +515,7 @@ function deleteLink(linkId) {
   if (!confirm(`'${link.title}' 링크를 삭제할까요?`)) return;
   state.links = state.links.filter((item) => item.id !== linkId);
   delete state.ui.readPositions[linkId];
+  localStorage.removeItem(getPdfReadingStorageKey(link.url));
   clearTimeout(readPositionTimers.get(linkId));
   state.ui.selectedLinkId = getVisibleLinks()[0]?.id || null;
   saveAndRender();
@@ -470,13 +582,19 @@ function normalizeState() {
 }
 
 function normalizeUrl(value) {
+  const v = String(value || "").trim();
+  if (!v) return null;
   try {
-    return new URL(value).toString();
+    return new URL(v).href;
   } catch {
     try {
-      return new URL(`https://${value}`).toString();
+      return new URL(v, window.location.href).href;
     } catch {
-      return null;
+      try {
+        return new URL(`https://${v}`).href;
+      } catch {
+        return null;
+      }
     }
   }
 }
@@ -581,6 +699,44 @@ function resolveRestoreScrollY(link, scrollElement, savedPosition) {
   }
 
   return 0;
+}
+
+function isPdfUrl(url) {
+  const base = String(url || "").split(/[?#]/)[0].toLowerCase();
+  return base.endsWith(".pdf");
+}
+
+function pdfViewerPageUrl(link, restart) {
+  const qs = new URLSearchParams();
+  qs.set("url", link.url);
+  if (restart) qs.set("mode", "restart");
+  const href = window.location.href.split("#")[0];
+  const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
+  const baseDir = slash >= 0 ? href.slice(0, slash + 1) : `${href}/`;
+  return `${baseDir}pdf-viewer.html?${qs.toString()}`;
+}
+
+function webViewerPageUrl(url) {
+  const qs = new URLSearchParams();
+  qs.set("url", url);
+  const href = window.location.href.split("#")[0];
+  const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
+  const baseDir = slash >= 0 ? href.slice(0, slash + 1) : `${href}/`;
+  return `${baseDir}web-viewer.html?${qs.toString()}`;
+}
+
+function openPdfViewer(linkId, restart) {
+  const link = state.links.find((item) => item.id === linkId);
+  if (!link || !isPdfUrl(link.url)) return;
+  window.location.href = pdfViewerPageUrl(link, restart);
+}
+
+function openLinkForReading(link) {
+  if (isPdfUrl(link.url)) {
+    openPdfViewer(link.id, false);
+  } else {
+    window.location.href = webViewerPageUrl(link.url);
+  }
 }
 
 function saveAndRender() {

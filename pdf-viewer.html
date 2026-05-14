@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF 뷰어 · KeepPoint</title>
+    <link rel="stylesheet" href="./pdf-viewer.css" />
+  </head>
+  <body>
+    <header class="pv-header">
+      <button type="button" id="backBtn" class="btn ghost">← 목록</button>
+      <div class="pv-title-wrap">
+        <h1 id="docTitle">PDF</h1>
+        <a id="sourceLink" href="#" target="_blank" rel="noreferrer" class="pv-source">원본 PDF 링크</a>
+      </div>
+    </header>
+
+    <div class="pv-toolbar">
+      <button type="button" id="prevPage" class="btn">이전 페이지</button>
+      <span id="pageLabel" class="pv-page">1 / ?</span>
+      <button type="button" id="nextPage" class="btn">다음 페이지</button>
+    </div>
+
+    <div id="pdfScroll" class="pv-scroll">
+      <canvas id="pdfCanvas"></canvas>
+    </div>
+
+    <p id="pdfError" class="pv-error hidden"></p>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="./pdf-viewer.js"></script>
+  </body>
+</html>

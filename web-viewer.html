@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>웹 뷰어 · KeepPoint</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, "Segoe UI", sans-serif;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: #f1f5f9;
+      }
+      header {
+        flex: 0 0 auto;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: #fff;
+        border-bottom: 1px solid #e2e8f0;
+      }
+      header .title {
+        flex: 1;
+        min-width: 120px;
+        font-size: 13px;
+        color: #334155;
+        word-break: break-all;
+      }
+      .btn {
+        padding: 8px 12px;
+        border-radius: 8px;
+        border: 1px solid #cbd5e1;
+        background: #fff;
+        font-size: 13px;
+        cursor: pointer;
+        text-decoration: none;
+        color: #0f172a;
+      }
+      .btn.primary {
+        background: #2563eb;
+        border-color: #1d4ed8;
+        color: #fff;
+      }
+      .btn.ghost {
+        background: transparent;
+      }
+      #frameWrap {
+        flex: 1;
+        min-height: 0;
+        position: relative;
+        background: #e2e8f0;
+      }
+      iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        display: block;
+        background: #fff;
+      }
+      #blockedBar {
+        display: none;
+        flex: 0 0 auto;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+        padding: 10px 12px;
+        background: #fef3c7;
+        color: #92400e;
+        font-size: 14px;
+        border-top: 1px solid #fcd34d;
+      }
+      #blockedBar.show {
+        display: flex;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a class="btn ghost" href="./index.html">← 목록</a>
+      <span class="title" id="titleEl">웹 뷰어</span>
+      <button type="button" class="btn primary" id="newTabBtn">새 탭에서 열기</button>
+      <button type="button" class="btn ghost" id="showBlockedBtn" title="내용이 비어 있거나 차단된 경우">뷰가 안 보이나요?</button>
+    </header>
+    <div id="frameWrap">
+      <iframe id="siteFrame" title="웹 페이지" allow="fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>
+    </div>
+    <div id="blockedBar" role="region" aria-label="내부 뷰어 제한 안내">
+      <button type="button" class="btn primary" id="newTabBtn2" style="font-size: 12px; line-height: 1.35; white-space: normal; text-align: left; max-width: 100%">
+        이 사이트는 내부 뷰어에서 열 수 없습니다. 새 탭에서 열기
+      </button>
+      <button type="button" class="btn ghost" id="hideBlockedBtn">닫기</button>
+    </div>
+
+    <script>
+      (() => {
+        const raw = new URLSearchParams(location.search).get("url");
+        const titleEl = document.getElementById("titleEl");
+        const frame = document.getElementById("siteFrame");
+        const blockedBar = document.getElementById("blockedBar");
+        const newTabBtn = document.getElementById("newTabBtn");
+        const newTabBtn2 = document.getElementById("newTabBtn2");
+        const showBlockedBtn = document.getElementById("showBlockedBtn");
+        const hideBlockedBtn = document.getElementById("hideBlockedBtn");
+
+        function resolveTarget(s) {
+          const v = String(s || "").trim();
+          if (!v) return "";
+          try {
+            return new URL(v).href;
+          } catch {
+            try {
+              return new URL(v, location.href).href;
+            } catch {
+              return "";
+            }
+          }
+        }
+
+        function safeFrameUrl(href) {
+          try {
+            const u = new URL(href);
+            if (u.protocol === "http:" || u.protocol === "https:" || u.protocol === "file:") return u.href;
+            return "";
+          } catch {
+            return "";
+          }
+        }
+
+        const target = safeFrameUrl(resolveTarget(raw));
+        if (!target) {
+          document.getElementById("frameWrap").innerHTML =
+            '<p style="padding:16px;">유효한 http(s) 또는 같은 폴더 기준 URL의 <code>?url=</code> 가 필요합니다.</p>';
+          return;
+        }
+
+        titleEl.textContent = target;
+
+        function openNewTab() {
+          window.open(target, "_blank", "noopener,noreferrer");
+        }
+
+        newTabBtn.addEventListener("click", openNewTab);
+        newTabBtn2.addEventListener("click", openNewTab);
+
+        function showBlocked() {
+          blockedBar.classList.add("show");
+        }
+        function hideBlocked() {
+          blockedBar.classList.remove("show");
+        }
+
+        showBlockedBtn.addEventListener("click", showBlocked);
+        hideBlockedBtn.addEventListener("click", hideBlocked);
+
+        frame.src = target;
+      })();
+    </script>
+  </body>
+</html>

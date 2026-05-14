@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "KeepPoint Verify (minimal)",
+  "version": "1.0.0",
+  "description": "http/https 페이지 스크롤 저장·복원 검증용",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

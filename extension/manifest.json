@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "KeepPoint Reader",
+  "version": "0.3.0",
+  "description": "http/https 페이지의 스크롤 위치를 저장·복원합니다.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

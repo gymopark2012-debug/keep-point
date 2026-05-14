@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KeepPoint 검증 (최소)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 32rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      .hint {
+        background: #fef3c7;
+        color: #92400e;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        margin-bottom: 1.25rem;
+      }
+      code {
+        font-size: 0.88em;
+      }
+      .btn {
+        display: inline-block;
+        margin: 0 0.5rem 0.5rem 0;
+        padding: 0.6rem 1rem;
+        border-radius: 8px;
+        border: none;
+        background: #2563eb;
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        font-size: 0.95rem;
+      }
+      .btn.secondary {
+        background: #64748b;
+      }
+      .btn:hover {
+        filter: brightness(1.05);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>KeepPoint 검증 (최소)</h1>
+    <p class="hint">
+      반드시 <strong>이 폴더(verify-minimal)</strong>에서 서버를 띄우세요.<br />
+      <code>cd "…\keep point\verify-minimal"</code><br />
+      <code>python -m http.server 5500</code><br />
+      Chrome: <code>http://localhost:5500/index.html</code> — <code>file://</code> 사용 금지
+    </p>
+    <p>
+      <button type="button" class="btn" id="btnPdf">PDF 테스트 열기</button>
+      <button type="button" class="btn secondary" id="btnWeb">일반 사이트 테스트 (example.com)</button>
+    </p>
+    <script>
+      document.getElementById("btnPdf").addEventListener("click", () => {
+        location.href = "./pdf-viewer.html?url=sample.pdf";
+      });
+      document.getElementById("btnWeb").addEventListener("click", () => {
+        window.open("https://example.com", "_blank", "noopener,noreferrer");
+      });
+    </script>
+  </body>
+</html>

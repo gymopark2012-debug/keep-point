@@ -1,0 +1,77 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: system-ui, "Segoe UI", sans-serif;
+  background: #1e293b;
+  color: #f1f5f9;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.pv-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #0f172a;
+  border-bottom: 1px solid #334155;
+}
+.pv-title-wrap h1 {
+  margin: 0;
+  font-size: 18px;
+}
+.pv-source {
+  font-size: 12px;
+  color: #93c5fd;
+}
+.pv-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: #334155;
+}
+.pv-page {
+  font-size: 14px;
+  min-width: 72px;
+  text-align: center;
+}
+.pv-scroll {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+}
+#pdfCanvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+.pv-error {
+  margin: 0;
+  padding: 12px 16px;
+  background: #7f1d1d;
+  color: #fecaca;
+  font-size: 14px;
+}
+.hidden {
+  display: none !important;
+}
+.btn {
+  border: 1px solid #3b82f6;
+  background: #2563eb;
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn.ghost {
+  background: transparent;
+  border-color: #64748b;
+  color: #e2e8f0;
+}

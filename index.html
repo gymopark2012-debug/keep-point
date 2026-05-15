@@ -33,6 +33,16 @@
           <input id="quickAddInput" placeholder="링크 붙여넣고 Enter..." />
         </div>
 
+        <div class="quick-add pdf-upload-row">
+          <input type="file" id="pdfFileInput" accept="application/pdf" hidden />
+          <button type="button" id="pickPdfBtn" class="btn ghost">내 PDF 열기</button>
+        </div>
+
+        <div class="section-header">
+          <h2>내 PC PDF</h2>
+        </div>
+        <ul id="localPdfList" class="list"></ul>
+
         <div class="section-header">
           <h2 id="currentCategoryTitle">링크 목록</h2>
         </div>

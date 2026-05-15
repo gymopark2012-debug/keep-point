@@ -1,9 +1,39 @@
-(() => {
+(async () => {
   const PDF_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
+  const IDB_NAME = "keepPointDB";
+  const IDB_VERSION = 1;
+  const IDB_STORE = "localPdfs";
+
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve(req.result);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE, { keyPath: "id" });
+        }
+      };
+    });
+  }
+
+  async function idbGetLocalPdfRecord(id) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const r = tx.objectStore(IDB_STORE).get(id);
+      r.onerror = () => reject(r.error);
+      r.onsuccess = () => resolve(r.result);
+    });
+  }
+
   const params = new URLSearchParams(window.location.search);
+  const localId = String(params.get("localId") || "").trim();
   const rawUrl = params.get("url");
   const isRestart = params.get("mode") === "restart";
+
   const backBtn = document.getElementById("backBtn");
   const docTitle = document.getElementById("docTitle");
   const sourceLink = document.getElementById("sourceLink");
@@ -15,8 +45,18 @@
   const pdfError = document.getElementById("pdfError");
 
   const pdfUrlParam = rawUrl ? String(rawUrl).trim() : "";
-  const pdfSrc = pdfUrlParam ? new URL(pdfUrlParam, window.location.href).href : "";
-  const storageKey = () => `keepPoint_pdf_reading_${encodeURIComponent(pdfUrlParam || pdfSrc)}`;
+
+  let pdfSrc = "";
+  let localIdMode = false;
+  let localMeta = null;
+  let revokeOnHide = null;
+
+  function getStorageKey() {
+    if (localIdMode && localId) {
+      return `keepPoint_pdf_local_${localId}`;
+    }
+    return `keepPoint_pdf_reading_${encodeURIComponent(pdfUrlParam || pdfSrc)}`;
+  }
 
   function indexPageHref() {
     const href = window.location.href.split("#")[0];
@@ -30,13 +70,22 @@
     return base.endsWith(".pdf");
   }
 
+  function looksLikeHttpUrl(u) {
+    try {
+      const x = new URL(u, window.location.href);
+      return x.protocol === "http:" || x.protocol === "https:";
+    } catch {
+      return false;
+    }
+  }
+
   function loadSavedPageNumber() {
     if (isRestart) {
-      localStorage.removeItem(storageKey());
+      localStorage.removeItem(getStorageKey());
       return 1;
     }
     try {
-      const raw = localStorage.getItem(storageKey());
+      const raw = localStorage.getItem(getStorageKey());
       if (!raw) return 1;
       const o = JSON.parse(raw);
       return Math.max(1, Number.parseInt(String(o.pageNumber), 10) || 1);
@@ -46,7 +95,12 @@
   }
 
   function persistPageNumber(pageNumber) {
-    localStorage.setItem(storageKey(), JSON.stringify({ url: pdfUrlParam, pageNumber }));
+    const payload = {
+      pageNumber,
+      url: localIdMode ? null : pdfUrlParam,
+      localId: localIdMode ? localId : null
+    };
+    localStorage.setItem(getStorageKey(), JSON.stringify(payload));
   }
 
   if (typeof pdfjsLib !== "undefined") {
@@ -62,13 +116,54 @@
     pdfError.textContent = err && err.message ? String(err.message) : "PDF 로드 실패";
   }
 
-  if (!pdfUrlParam || !isPdfPath(pdfUrlParam)) {
-    showErr(new Error("PDF가 필요합니다. 예: pdf-viewer.html?url=sample.pdf"));
+  try {
+    if (localId) {
+      localIdMode = true;
+      const rec = await idbGetLocalPdfRecord(localId);
+      if (!rec?.blob) {
+        throw new Error("IndexedDB에 PDF가 없습니다. 메인 화면에서 다시 추가해 주세요.");
+      }
+      localMeta = rec;
+      const blobUrl = URL.createObjectURL(rec.blob);
+      pdfSrc = blobUrl;
+      revokeOnHide = blobUrl;
+    } else {
+      if (!pdfUrlParam || pdfUrlParam.startsWith("blob:")) {
+        throw new Error("PDF가 필요합니다. 링크(?url=…pdf) 또는 내 PC PDF는 「이어 읽기」로 열어 주세요.");
+      }
+      if (!isPdfPath(pdfUrlParam) && !looksLikeHttpUrl(pdfUrlParam)) {
+        throw new Error("PDF 주소가 올바르지 않습니다. (.pdf 링크 또는 http(s) URL)");
+      }
+      pdfSrc = new URL(pdfUrlParam, window.location.href).href;
+    }
+  } catch (e) {
+    showErr(e);
     return;
   }
 
-  sourceLink.href = pdfSrc;
-  sourceLink.textContent = pdfUrlParam;
+  if (revokeOnHide) {
+    window.addEventListener(
+      "pagehide",
+      () => {
+        try {
+          URL.revokeObjectURL(revokeOnHide);
+        } catch {
+          /* ignore */
+        }
+      },
+      { once: true }
+    );
+  }
+
+  if (localIdMode) {
+    sourceLink.href = "#";
+    sourceLink.textContent = localMeta?.fileName || "로컬 PDF";
+    sourceLink.title = "이 기기에 저장된 PDF";
+  } else {
+    sourceLink.href = pdfSrc;
+    sourceLink.textContent = pdfUrlParam;
+    sourceLink.removeAttribute("download");
+  }
 
   let currentPage = loadSavedPageNumber();
   let pdfDoc = null;
@@ -123,13 +218,21 @@
     .then(async (doc) => {
       pdfDoc = doc;
       totalPages = doc.numPages;
-      docTitle.textContent = "PDF";
-      try {
-        const meta = await doc.getMetadata();
-        const t = meta?.info?.Title;
-        if (t && String(t).trim()) docTitle.textContent = String(t).trim();
-      } catch {
-        /* ignore */
+      let titleFromUser = false;
+      if (localIdMode && localMeta?.title && String(localMeta.title).trim()) {
+        docTitle.textContent = String(localMeta.title).trim();
+        titleFromUser = true;
+      } else {
+        docTitle.textContent = "PDF";
+      }
+      if (!titleFromUser) {
+        try {
+          const meta = await doc.getMetadata();
+          const t = meta?.info?.Title;
+          if (t && String(t).trim()) docTitle.textContent = String(t).trim();
+        } catch {
+          /* ignore */
+        }
       }
       currentPage = Math.min(Math.max(1, currentPage), totalPages);
       await renderPage();

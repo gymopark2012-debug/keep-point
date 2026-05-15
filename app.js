@@ -14,6 +14,69 @@ function getPdfSnapshotFromStorage(linkUrl) {
   }
 }
 
+const IDB_NAME = "keepPointDB";
+const IDB_VERSION = 1;
+const IDB_STORE = "localPdfs";
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: "id" });
+      }
+    };
+  });
+}
+
+async function idbPutLocalPdfRecord(record) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore(IDB_STORE).put(record);
+  });
+}
+
+async function idbGetLocalPdfRecord(id) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const r = tx.objectStore(IDB_STORE).get(id);
+    r.onerror = () => reject(r.error);
+    r.onsuccess = () => resolve(r.result);
+  });
+}
+
+async function idbDeleteLocalPdfRecord(id) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore(IDB_STORE).delete(id);
+  });
+}
+
+function getLocalPdfPageStorageKey(id) {
+  return `keepPoint_pdf_local_${id}`;
+}
+
+function getLocalPdfLastPage(id) {
+  try {
+    const raw = localStorage.getItem(getLocalPdfPageStorageKey(id));
+    if (!raw) return 1;
+    const o = JSON.parse(raw);
+    return Math.max(1, Number.parseInt(String(o.pageNumber), 10) || 1);
+  } catch {
+    return 1;
+  }
+}
+
 const defaultData = {
   profile: { name: "박경모" },
   categories: [
@@ -49,6 +112,7 @@ const defaultData = {
       lastVisitedAt: "2025-02-05T14:00:00.000Z"
     }
   ],
+  localPdfs: [],
   ui: {
     selectedCategoryId: ALL_CATEGORY,
     selectedLinkId: "l2",
@@ -67,10 +131,13 @@ let teardownDetailView = () => {};
 const categoryTabs = document.getElementById("categoryTabs");
 const recentList = document.getElementById("recentList");
 const linkList = document.getElementById("linkList");
+const localPdfList = document.getElementById("localPdfList");
 const detailView = document.getElementById("detailView");
 const currentCategoryTitle = document.getElementById("currentCategoryTitle");
 const profileName = document.getElementById("profileName");
 const quickAddInput = document.getElementById("quickAddInput");
+const pdfFileInput = document.getElementById("pdfFileInput");
+const pickPdfBtn = document.getElementById("pickPdfBtn");
 const categoryModal = document.getElementById("categoryModal");
 const categoryForm = document.getElementById("categoryForm");
 const categoryNameInput = document.getElementById("categoryNameInput");
@@ -82,6 +149,10 @@ document.getElementById("addCategoryBtn").addEventListener("click", () => {
 document.getElementById("deleteCategoryBtn").addEventListener("click", deleteSelectedCategory);
 categoryForm.addEventListener("submit", onCreateCategory);
 quickAddInput.addEventListener("keydown", onQuickAdd);
+if (pickPdfBtn && pdfFileInput) {
+  pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
+  pdfFileInput.addEventListener("change", onPdfFileSelected);
+}
 
 function onCreateCategory(event) {
   event.preventDefault();
@@ -103,7 +174,11 @@ async function onQuickAdd(event) {
 
   const parsed = normalizeUrl(rawUrl);
   if (!parsed) {
-    alert("올바른 링크를 붙여넣어 주세요.");
+    if (/file:/i.test(rawUrl)) {
+      alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
+    } else {
+      alert("올바른 링크를 붙여넣어 주세요.");
+    }
     return;
   }
 
@@ -133,10 +208,72 @@ async function onQuickAdd(event) {
   quickAddInput.value = "";
 }
 
+function openLocalPdfViewer(id) {
+  const href = window.location.href.split("#")[0];
+  const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
+  const baseDir = slash >= 0 ? href.slice(0, slash + 1) : `${href}/`;
+  const qs = new URLSearchParams();
+  qs.set("localId", id);
+  window.location.href = `${baseDir}pdf-viewer.html?${qs.toString()}`;
+}
+
+async function deleteLocalPdf(id) {
+  if (!confirm("이 PDF를 목록과 이 기기 저장소에서 삭제할까요?")) return;
+  try {
+    await idbDeleteLocalPdfRecord(id);
+  } catch (e) {
+    console.error(e);
+  }
+  localStorage.removeItem(getLocalPdfPageStorageKey(id));
+  state.localPdfs = (state.localPdfs || []).filter((x) => x.id !== id);
+  saveAndRender();
+}
+
+async function onPdfFileSelected() {
+  const file = pdfFileInput.files?.[0];
+  pdfFileInput.value = "";
+  if (!file) return;
+  const okType = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+  if (!okType) {
+    alert("PDF 파일만 선택할 수 있습니다.");
+    return;
+  }
+  const id = createId("p");
+  const baseTitle = file.name.replace(/\.pdf$/i, "") || file.name;
+  const createdAt = new Date().toISOString();
+  const record = {
+    id,
+    blob: file,
+    fileName: file.name,
+    title: baseTitle,
+    size: file.size,
+    lastModified: file.lastModified,
+    createdAt
+  };
+  try {
+    await idbPutLocalPdfRecord(record);
+  } catch (e) {
+    console.error(e);
+    alert("PDF를 저장하지 못했습니다. IndexedDB를 사용할 수 있는지 확인해 주세요.");
+    return;
+  }
+  if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
+  state.localPdfs.unshift({
+    id,
+    title: baseTitle,
+    fileName: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+    addedAt: createdAt
+  });
+  saveAndRender();
+}
+
 function render() {
   profileName.textContent = state.profile.name;
   renderTabs();
   renderRecent();
+  renderLocalPdfList();
   renderLinks();
   renderDetail();
 }
@@ -179,6 +316,56 @@ function renderRecent() {
       selectLink(link.id);
     });
     recentList.appendChild(li);
+  }
+}
+
+function renderLocalPdfList() {
+  if (!localPdfList) return;
+  localPdfList.innerHTML = "";
+  const list = Array.isArray(state.localPdfs) ? state.localPdfs : [];
+  if (!list.length) {
+    const empty = document.createElement("li");
+    empty.className = "local-pdf-empty";
+    empty.textContent = "저장된 내 PC PDF가 없습니다. 위의 「내 PDF 열기」로 파일을 추가해 주세요.";
+    localPdfList.appendChild(empty);
+    return;
+  }
+  for (const item of list) {
+    const lastPage = getLocalPdfLastPage(item.id);
+    const li = document.createElement("li");
+    li.className = "local-pdf-card";
+    li.innerHTML = `
+      <div class="local-pdf-card-head">
+        <input type="text" class="local-pdf-title-input" value="${escapeHtml(item.title)}" aria-label="PDF 제목" />
+      </div>
+      <div class="meta">파일: ${escapeHtml(item.fileName)}</div>
+      <div class="meta">마지막 읽은 페이지: <strong>${lastPage}</strong>쪽</div>
+      <div class="local-pdf-card-actions">
+        <button type="button" class="btn" data-action="continue">이어 읽기</button>
+        <button type="button" class="btn danger" data-action="remove">삭제</button>
+      </div>
+    `;
+    const titleInput = li.querySelector(".local-pdf-title-input");
+    titleInput.addEventListener("blur", () => {
+      const newTitle = titleInput.value.trim() || item.fileName;
+      if (newTitle === item.title) return;
+      item.title = newTitle;
+      idbGetLocalPdfRecord(item.id)
+        .then((rec) => {
+          if (rec) {
+            rec.title = newTitle;
+            return idbPutLocalPdfRecord(rec);
+          }
+        })
+        .catch(console.error);
+      saveAndRender();
+    });
+    li.querySelector('[data-action="continue"]').addEventListener("click", () => openLocalPdfViewer(item.id));
+    li.querySelector('[data-action="remove"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteLocalPdf(item.id);
+    });
+    localPdfList.appendChild(li);
   }
 }
 
@@ -260,7 +447,7 @@ function renderDetail() {
       <div id="readingFocusText" class="reading-focus-text"></div>
     </section>
     <div id="readMarker" class="read-marker">── 여기까지 읽음 ── ${readPercent}%</div>`
-    : `<p class="meta">PDF는 <strong>읽기</strong> 또는 위의 <strong>PDF 뷰어에서 열기</strong>로 확인하세요.</p>`;
+    : `<p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`;
 
   detailView.innerHTML = `
     <div class="hover-actions">
@@ -553,6 +740,7 @@ function getVisibleLinks() {
 }
 
 function normalizeState() {
+  if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
   if (!state.ui.readPositions) state.ui.readPositions = {};
   for (const [linkId, value] of Object.entries(state.ui.readPositions)) {
     if (typeof value === "number") {
@@ -584,14 +772,20 @@ function normalizeState() {
 function normalizeUrl(value) {
   const v = String(value || "").trim();
   if (!v) return null;
+  if (/^file:/i.test(v)) return null;
   try {
-    return new URL(v).href;
+    const u = new URL(v);
+    if (u.protocol === "file:") return null;
+    return u.href;
   } catch {
     try {
-      return new URL(v, window.location.href).href;
+      const u2 = new URL(v, window.location.href);
+      if (u2.protocol === "file:") return null;
+      return u2.href;
     } catch {
       try {
-        return new URL(`https://${v}`).href;
+        const u3 = new URL(`https://${v}`);
+        return u3.href;
       } catch {
         return null;
       }
@@ -701,6 +895,16 @@ function resolveRestoreScrollY(link, scrollElement, savedPosition) {
   return 0;
 }
 
+function isDisallowedLocalFileUrl(url) {
+  const s = String(url || "").trim();
+  if (/^file:/i.test(s)) return true;
+  try {
+    return new URL(s).protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
 function isPdfUrl(url) {
   const base = String(url || "").split(/[?#]/)[0].toLowerCase();
   return base.endsWith(".pdf");
@@ -728,10 +932,18 @@ function webViewerPageUrl(url) {
 function openPdfViewer(linkId, restart) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link || !isPdfUrl(link.url)) return;
+  if (isDisallowedLocalFileUrl(link.url)) {
+    alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
+    return;
+  }
   window.location.href = pdfViewerPageUrl(link, restart);
 }
 
 function openLinkForReading(link) {
+  if (isDisallowedLocalFileUrl(link.url)) {
+    alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
+    return;
+  }
   if (isPdfUrl(link.url)) {
     openPdfViewer(link.id, false);
   } else {

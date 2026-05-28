@@ -1,4 +1,6 @@
 const STORAGE_KEY = "keepPointDataV2";
+const AUTH_KEY = "keepPointAuthV1";
+const CLOUD_KEY_PREFIX = "keepPointCloudV1_";
 const ALL_CATEGORY = "all";
 
 function getPdfReadingStorageKey(linkUrl) {
@@ -62,6 +64,16 @@ async function idbDeleteLocalPdfRecord(id) {
   });
 }
 
+async function idbGetAllLocalPdfRecords() {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).getAll();
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result || []);
+  });
+}
+
 function getLocalPdfPageStorageKey(id) {
   return `keepPoint_pdf_local_${id}`;
 }
@@ -77,8 +89,39 @@ function getLocalPdfLastPage(id) {
   }
 }
 
+function cloudStorageKey(userId) {
+  return `${CLOUD_KEY_PREFIX}${encodeURIComponent(userId || "")}`;
+}
+
+function loadAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_KEY);
+    if (!raw) return { isLoggedIn: false, userId: "guest", name: "게스트", email: "" };
+    const parsed = JSON.parse(raw);
+    if (parsed?.isLoggedIn && parsed?.userId) {
+      return {
+        isLoggedIn: true,
+        userId: String(parsed.userId),
+        name: String(parsed.name || "사용자"),
+        email: String(parsed.email || "")
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { isLoggedIn: false, userId: "guest", name: "게스트", email: "" };
+}
+
+function saveAuth() {
+  localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+}
+
+function getSavedItemCount() {
+  return (Array.isArray(state.links) ? state.links.length : 0) + (Array.isArray(state.localPdfs) ? state.localPdfs.length : 0);
+}
+
 const defaultData = {
-  profile: { name: "박경모" },
+  profile: { name: "게스트" },
   categories: [
     { id: "c1", name: "과제" },
     { id: "c2", name: "나중에 볼 것" }
@@ -117,10 +160,12 @@ const defaultData = {
     selectedCategoryId: ALL_CATEGORY,
     selectedLinkId: "l2",
     expandedDescription: false,
-    readPositions: {}
+    readPositions: {},
+    loginPromptedForLimit: false
   }
 };
 
+const auth = loadAuth();
 const state = load();
 normalizeState();
 const autoSaveTimers = new Map();
@@ -135,12 +180,28 @@ const localPdfList = document.getElementById("localPdfList");
 const detailView = document.getElementById("detailView");
 const currentCategoryTitle = document.getElementById("currentCategoryTitle");
 const profileName = document.getElementById("profileName");
+const openLoginBtn = document.getElementById("openLoginBtn");
+const openProfileBtn = document.getElementById("openProfileBtn");
 const quickAddInput = document.getElementById("quickAddInput");
 const pdfFileInput = document.getElementById("pdfFileInput");
 const pickPdfBtn = document.getElementById("pickPdfBtn");
 const categoryModal = document.getElementById("categoryModal");
 const categoryForm = document.getElementById("categoryForm");
 const categoryNameInput = document.getElementById("categoryNameInput");
+const loginModal = document.getElementById("loginModal");
+const loginForm = document.getElementById("loginForm");
+const loginNameInput = document.getElementById("loginNameInput");
+const loginEmailInput = document.getElementById("loginEmailInput");
+const profileModal = document.getElementById("profileModal");
+const profileStatusText = document.getElementById("profileStatusText");
+const profileNameInput = document.getElementById("profileNameInput");
+const profileEmailInput = document.getElementById("profileEmailInput");
+const deleteAccountBtn = document.getElementById("deleteAccountBtn");
+const guestNotice = document.getElementById("guestNotice");
+const syncAcrossDevicesBtn = document.getElementById("syncAcrossDevicesBtn");
+const connectExtensionBtn = document.getElementById("connectExtensionBtn");
+const saveAiSummaryBtn = document.getElementById("saveAiSummaryBtn");
+const createShareLinkBtn = document.getElementById("createShareLinkBtn");
 
 document.getElementById("addCategoryBtn").addEventListener("click", () => {
   categoryNameInput.value = "";
@@ -148,10 +209,157 @@ document.getElementById("addCategoryBtn").addEventListener("click", () => {
 });
 document.getElementById("deleteCategoryBtn").addEventListener("click", deleteSelectedCategory);
 categoryForm.addEventListener("submit", onCreateCategory);
+if (openLoginBtn) openLoginBtn.addEventListener("click", () => openLoginModal("manual"));
+if (openProfileBtn) openProfileBtn.addEventListener("click", openProfileModal);
+if (loginForm) loginForm.addEventListener("submit", onLoginSubmit);
+if (deleteAccountBtn) deleteAccountBtn.addEventListener("click", onDeleteAccount);
+if (syncAcrossDevicesBtn) syncAcrossDevicesBtn.addEventListener("click", onSyncAcrossDevicesClick);
+if (connectExtensionBtn) connectExtensionBtn.addEventListener("click", onConnectExtensionClick);
+if (saveAiSummaryBtn) saveAiSummaryBtn.addEventListener("click", onSaveAiSummaryClick);
+if (createShareLinkBtn) createShareLinkBtn.addEventListener("click", onCreateShareLinkClick);
 quickAddInput.addEventListener("keydown", onQuickAdd);
 if (pickPdfBtn && pdfFileInput) {
   pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
   pdfFileInput.addEventListener("change", onPdfFileSelected);
+}
+
+function requireLoginFor(reason) {
+  if (auth.isLoggedIn) return true;
+  openLoginModal(reason);
+  return false;
+}
+
+function onSyncAcrossDevicesClick() {
+  if (!requireLoginFor("sync")) return;
+  alert("로그인된 계정의 클라우드 동기화가 활성화되어 있습니다.");
+}
+
+function onConnectExtensionClick() {
+  if (!requireLoginFor("extension")) return;
+  alert("Chrome 확장프로그램 화면을 열어 KeepPoint 확장을 연결해 주세요.");
+}
+
+function openProfileModal() {
+  if (!profileModal) return;
+  if (!auth.isLoggedIn) {
+    openLoginModal("manual");
+    return;
+  }
+  if (profileStatusText) profileStatusText.textContent = "로그인된 계정 정보";
+  if (profileNameInput) profileNameInput.value = auth.name || "";
+  if (profileEmailInput) profileEmailInput.value = auth.email || "";
+  profileModal.showModal();
+}
+
+function onDeleteAccount() {
+  if (!auth.isLoggedIn) return;
+  const ok = confirm("계정을 삭제할까요?\n클라우드에 저장된 계정 데이터가 삭제되고 게스트 모드로 전환됩니다.");
+  if (!ok) return;
+
+  const cloudKey = cloudStorageKey(auth.userId);
+  localStorage.removeItem(cloudKey);
+  localStorage.removeItem(AUTH_KEY);
+
+  auth.isLoggedIn = false;
+  auth.userId = "guest";
+  auth.name = "게스트";
+  auth.email = "";
+
+  state.profile.name = "게스트";
+  state.ui.loginPromptedForLimit = false;
+  saveAndRender();
+  if (profileModal?.open) profileModal.close();
+}
+
+function onSaveAiSummaryClick() {
+  if (!requireLoginFor("ai-summary")) return;
+  alert("AI 요약이 계정에 저장되었습니다.");
+}
+
+function onCreateShareLinkClick() {
+  if (!requireLoginFor("share-link")) return;
+  const link = state.links.find((x) => x.id === state.ui.selectedLinkId);
+  if (!link) {
+    alert("공유할 링크를 먼저 선택해 주세요.");
+    return;
+  }
+  shareLink(link.id);
+}
+
+function openLoginModal(reason) {
+  if (!loginModal) return;
+  const reasonMap = {
+    limit: "읽던 위치를 계속 보관하려면 로그인하세요.",
+    sync: "로그인하면 다른 기기에서도 이어 읽을 수 있어요.",
+    extension: "Chrome Extension 연동은 로그인 후 사용할 수 있어요.",
+    "ai-summary": "AI 요약 저장은 로그인 후 사용할 수 있어요.",
+    "share-link": "공유 링크 만들기는 로그인 후 사용할 수 있어요.",
+    manual: "읽던 위치를 계속 보관하려면 로그인하세요."
+  };
+  const msg = reasonMap[reason] || reasonMap.manual;
+  const helper = loginForm?.querySelector(".meta");
+  if (helper) helper.textContent = msg;
+  if (loginNameInput) loginNameInput.value = auth.name === "게스트" ? "" : auth.name;
+  if (loginEmailInput) loginEmailInput.value = auth.email || "";
+  loginModal.showModal();
+}
+
+async function migrateGuestDataToUser(userId) {
+  const cloudPayload = structuredClone(state);
+  cloudPayload.profile = { name: auth.name };
+
+  const pdfReading = {};
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith("keepPoint_pdf_")) {
+      const raw = localStorage.getItem(key);
+      if (raw != null) pdfReading[key] = raw;
+    }
+  }
+  cloudPayload.__pdfReading = pdfReading;
+  localStorage.setItem(cloudStorageKey(userId), JSON.stringify(cloudPayload));
+
+  try {
+    const all = await idbGetAllLocalPdfRecords();
+    await Promise.all(
+      all.map((rec) => {
+        if (!rec || rec.ownerId === userId) return Promise.resolve();
+        const next = { ...rec, ownerId: userId };
+        return idbPutLocalPdfRecord(next);
+      })
+    );
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function onLoginSubmit(event) {
+  event.preventDefault();
+  const email = String(loginEmailInput?.value || "").trim().toLowerCase();
+  if (!email) return;
+  const name = String(loginNameInput?.value || "").trim() || email.split("@")[0] || "사용자";
+  const userId = email.replace(/[^a-z0-9@._-]/gi, "_");
+
+  auth.isLoggedIn = true;
+  auth.userId = userId;
+  auth.name = name;
+  auth.email = email;
+  saveAuth();
+
+  await migrateGuestDataToUser(userId);
+  state.profile.name = name;
+  saveAndRender();
+  if (loginModal?.open) loginModal.close();
+}
+
+function maybePromptLoginByLimit(previousCount) {
+  if (auth.isLoggedIn) return;
+  if (state.ui.loginPromptedForLimit) return;
+  const before = Number.isFinite(previousCount) ? previousCount : getSavedItemCount();
+  const after = getSavedItemCount();
+  if (!(before < 3 && after >= 3)) return;
+  state.ui.loginPromptedForLimit = true;
+  saveAndRender();
+  openLoginModal("limit");
 }
 
 function onCreateCategory(event) {
@@ -192,6 +400,7 @@ async function onQuickAdd(event) {
     return;
   }
 
+  const previousCount = getSavedItemCount();
   const link = {
     id: createId("l"),
     categoryId: targetCategoryId,
@@ -206,6 +415,7 @@ async function onQuickAdd(event) {
   state.ui.selectedCategoryId = targetCategoryId;
   selectLink(link.id);
   quickAddInput.value = "";
+  maybePromptLoginByLimit(previousCount);
 }
 
 function openLocalPdfViewer(id) {
@@ -238,6 +448,7 @@ async function onPdfFileSelected() {
     alert("PDF 파일만 선택할 수 있습니다.");
     return;
   }
+  const previousCount = getSavedItemCount();
   const id = createId("p");
   const baseTitle = file.name.replace(/\.pdf$/i, "") || file.name;
   const createdAt = new Date().toISOString();
@@ -267,10 +478,19 @@ async function onPdfFileSelected() {
     addedAt: createdAt
   });
   saveAndRender();
+  maybePromptLoginByLimit(previousCount);
 }
 
 function render() {
-  profileName.textContent = state.profile.name;
+  profileName.textContent = auth.isLoggedIn ? `${state.profile.name}` : "게스트";
+  if (openLoginBtn) openLoginBtn.textContent = auth.isLoggedIn ? "다른 계정 로그인" : "로그인";
+  if (openLoginBtn) openLoginBtn.disabled = false;
+  if (openProfileBtn) openProfileBtn.disabled = !auth.isLoggedIn;
+  if (guestNotice) {
+    guestNotice.textContent = auth.isLoggedIn
+      ? "로그인 완료: 다른 기기 동기화와 확장 연동 기능을 사용할 수 있어요."
+      : "지금까지는 이 브라우저에만 저장돼요. 로그인하면 다른 기기에서도 이어 읽을 수 있어요.";
+  }
   renderTabs();
   renderRecent();
   renderLocalPdfList();
@@ -426,8 +646,6 @@ function renderDetail() {
   detailView.classList.remove("empty");
   const isPdf = isPdfUrl(link.url);
   const pdfSnap = isPdf ? getPdfSnapshotFromStorage(link.url) : null;
-  const savedReadPosition = getReadPosition(link.id);
-  const readPercent = savedReadPosition.scrollProgress;
   const saveStatusText = runtimeSaveStatus[link.id] || "저장됨";
 
   const pdfPageLine =
@@ -435,19 +653,11 @@ function renderDetail() {
 
   const readCardHtml = isPdf
     ? `<div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
-    : `<div class="resume-card"><strong>웹사이트</strong><p class="meta" style="margin:6px 0 0;">먼저 iframe 내부 뷰어로 열고, 막히면 새 탭으로 열 수 있습니다. (실제 사이트 스크롤 저장은 Chrome 확장에서 할 수 있습니다.)</p><div class="resume-actions"><button type="button" class="btn" id="openWebViewerBtn">내부 뷰어에서 열기</button><button type="button" class="btn ghost" id="openWebNewTabBtn">새 탭에서 열기</button></div></div>`;
+    : `<div class="resume-card"><strong>웹사이트</strong><p class="meta" style="margin:6px 0 0;">KeepPoint 안의 iframe·내부 reader로는 열지 않습니다. 아래 버튼은 <strong>원문 URL을 새 탭</strong>으로 엽니다. 스크롤·선택 위치는 <strong>KeepPoint Chrome 확장</strong>이 해당 사이트에서 저장·복원합니다.</p><div class="resume-actions"><button type="button" class="btn" id="resumeWebReadBtn">이어 읽기</button></div></div>`;
 
-  const readingBlock = !isPdf
-    ? `<section>
-      <h4>읽기 보기 (메모 안)</h4>
-      <div class="reading-wrap">
-        <div id="readingSurface" class="reading-surface">${escapeHtml(link.description || "설명 없음")}</div>
-        <div class="reading-cursor" aria-hidden="true">현재 읽는 위치</div>
-      </div>
-      <div id="readingFocusText" class="reading-focus-text"></div>
-    </section>
-    <div id="readMarker" class="read-marker">── 여기까지 읽음 ── ${readPercent}%</div>`
-    : `<p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`;
+  const readingBlock = isPdf
+    ? `<p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`
+    : `<p class="meta">일반 웹사이트의 마지막 위치 복원은 KeepPoint 웹앱이 아니라 Chrome 확장프로그램이 처리합니다.</p>`;
 
   detailView.innerHTML = `
     <div class="hover-actions">
@@ -479,14 +689,10 @@ function renderDetail() {
   const selectedTagsEl = document.getElementById("selectedTags");
   const tagSuggestionsEl = document.getElementById("tagSuggestions");
   const newTagInput = document.getElementById("newTagInput");
-  const readMarkerEl = document.getElementById("readMarker");
-  const readingSurface = document.getElementById("readingSurface");
-  const readingFocusTextEl = document.getElementById("readingFocusText");
   const openPdfBtn = document.getElementById("openPdfBtn");
   const restartPdfBtn = document.getElementById("restartPdfBtn");
   const clearPdfBtn = document.getElementById("clearPdfBtn");
-  const openWebViewerBtn = document.getElementById("openWebViewerBtn");
-  const openWebNewTabBtn = document.getElementById("openWebNewTabBtn");
+  const resumeWebReadBtn = document.getElementById("resumeWebReadBtn");
   let draftDesc = link.description || "";
   let draftTags = [...link.tags];
 
@@ -499,9 +705,6 @@ function renderDetail() {
     updateStatus("저장 중...");
     link.description = draftDesc.trim();
     link.tags = [...new Set(draftTags)];
-    if (readingSurface) {
-      readingSurface.textContent = link.description || "설명 없음";
-    }
     saveAndRender();
     runtimeSaveStatus[link.id] = "저장됨";
     const refreshed = document.getElementById("saveStatus");
@@ -576,43 +779,6 @@ function renderDetail() {
   };
   newTagInput.addEventListener("keydown", onNewTagKeydown);
 
-  const restoreReadPosition = (behavior) => {
-    if (!readingSurface) return;
-    const targetY = resolveRestoreScrollY(link, readingSurface, savedReadPosition);
-    readingSurface.scrollTo({ top: targetY, behavior });
-  };
-
-  const updateReadingDisplay = (position) => {
-    if (readMarkerEl) readMarkerEl.textContent = `── 현재 읽는 위치 ── ${position.scrollProgress}%`;
-    if (!readingFocusTextEl) return;
-    const source = (draftDesc || "").trim();
-    if (!source) {
-      readingFocusTextEl.textContent = "설명을 입력하면 현재 읽는 위치 미리보기가 표시됩니다.";
-      return;
-    }
-    const cursorIndex = Math.min(source.length - 1, Math.max(0, Math.floor((position.scrollProgress / 100) * source.length)));
-    const preview = source.slice(Math.max(0, cursorIndex - 28), Math.min(source.length, cursorIndex + 28));
-    readingFocusTextEl.textContent = `읽는 부분: ...${preview}...`;
-  };
-
-  let onReadingScroll = null;
-  if (readingSurface) {
-    requestAnimationFrame(() => restoreReadPosition(savedReadPosition.scrollY > 0 ? "smooth" : "auto"));
-    requestAnimationFrame(() => updateReadingDisplay(savedReadPosition));
-
-    onReadingScroll = () => {
-      const livePosition = getReadPositionFromElement(readingSurface);
-      updateReadingDisplay(livePosition);
-      clearTimeout(readPositionTimers.get(link.id));
-      const timer = setTimeout(() => {
-        const nextPosition = saveReadPosition(link.id, readingSurface);
-        updateReadingDisplay(nextPosition);
-      }, 1000);
-      readPositionTimers.set(link.id, timer);
-    };
-    readingSurface.addEventListener("scroll", onReadingScroll, { passive: true });
-  }
-
   const onOpenPdfClick = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -629,22 +795,16 @@ function renderDetail() {
     localStorage.removeItem(getPdfReadingStorageKey(link.url));
     saveAndRender();
   };
-  const onOpenWebViewerClick = (e) => {
+  const onResumeWebReadClick = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    window.location.href = webViewerPageUrl(link.url);
-  };
-  const onOpenWebNewTabClick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    window.open(link.url, "_blank", "noopener,noreferrer");
+    openWebLinkInNewTab(link);
   };
 
   if (openPdfBtn) openPdfBtn.addEventListener("click", onOpenPdfClick);
   if (restartPdfBtn) restartPdfBtn.addEventListener("click", onRestartPdfClick);
   if (clearPdfBtn) clearPdfBtn.addEventListener("click", onClearPdfClick);
-  if (openWebViewerBtn) openWebViewerBtn.addEventListener("click", onOpenWebViewerClick);
-  if (openWebNewTabBtn) openWebNewTabBtn.addEventListener("click", onOpenWebNewTabClick);
+  if (resumeWebReadBtn) resumeWebReadBtn.addEventListener("click", onResumeWebReadClick);
 
   const onShareClick = () => shareLink(link.id);
   const onDeleteClick = () => deleteLink(link.id);
@@ -658,14 +818,10 @@ function renderDetail() {
     clearTimeout(readPositionTimers.get(link.id));
     descInput.removeEventListener("input", onDescInput);
     newTagInput.removeEventListener("keydown", onNewTagKeydown);
-    if (readingSurface && onReadingScroll) {
-      readingSurface.removeEventListener("scroll", onReadingScroll);
-    }
     if (openPdfBtn) openPdfBtn.removeEventListener("click", onOpenPdfClick);
     if (restartPdfBtn) restartPdfBtn.removeEventListener("click", onRestartPdfClick);
     if (clearPdfBtn) clearPdfBtn.removeEventListener("click", onClearPdfClick);
-    if (openWebViewerBtn) openWebViewerBtn.removeEventListener("click", onOpenWebViewerClick);
-    if (openWebNewTabBtn) openWebNewTabBtn.removeEventListener("click", onOpenWebNewTabClick);
+    if (resumeWebReadBtn) resumeWebReadBtn.removeEventListener("click", onResumeWebReadClick);
     shareCurrentBtn.removeEventListener("click", onShareClick);
     deleteCurrentBtn.removeEventListener("click", onDeleteClick);
   };
@@ -709,6 +865,7 @@ function deleteLink(linkId) {
 }
 
 function shareLink(linkId) {
+  if (!requireLoginFor("share-link")) return;
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
   const category = state.categories.find((item) => item.id === link.categoryId);
@@ -740,7 +897,10 @@ function getVisibleLinks() {
 }
 
 function normalizeState() {
+  if (!state.ui || typeof state.ui !== "object") state.ui = {};
   if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
+  if (!state.profile || typeof state.profile !== "object") state.profile = { name: "게스트" };
+  if (!state.ui.loginPromptedForLimit) state.ui.loginPromptedForLimit = false;
   if (!state.ui.readPositions) state.ui.readPositions = {};
   for (const [linkId, value] of Object.entries(state.ui.readPositions)) {
     if (typeof value === "number") {
@@ -840,6 +1000,9 @@ function saveReadPosition(linkId, scrollElement) {
   const payload = getReadPositionFromElement(scrollElement, link);
   state.ui.readPositions[linkId] = payload;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (auth.isLoggedIn) {
+    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(state));
+  }
   return payload;
 }
 
@@ -920,15 +1083,6 @@ function pdfViewerPageUrl(link, restart) {
   return `${baseDir}pdf-viewer.html?${qs.toString()}`;
 }
 
-function webViewerPageUrl(url) {
-  const qs = new URLSearchParams();
-  qs.set("url", url);
-  const href = window.location.href.split("#")[0];
-  const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
-  const baseDir = slash >= 0 ? href.slice(0, slash + 1) : `${href}/`;
-  return `${baseDir}web-viewer.html?${qs.toString()}`;
-}
-
 function openPdfViewer(linkId, restart) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link || !isPdfUrl(link.url)) return;
@@ -939,6 +1093,17 @@ function openPdfViewer(linkId, restart) {
   window.location.href = pdfViewerPageUrl(link, restart);
 }
 
+function openWebLinkInNewTab(link) {
+  const normalized = normalizeUrl(link.url);
+  if (!normalized) {
+    alert("열 수 없는 링크입니다.");
+    return;
+  }
+  link.lastVisitedAt = new Date().toISOString();
+  window.open(normalized, "_blank", "noopener,noreferrer");
+  saveAndRender();
+}
+
 function openLinkForReading(link) {
   if (isDisallowedLocalFileUrl(link.url)) {
     alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
@@ -947,17 +1112,36 @@ function openLinkForReading(link) {
   if (isPdfUrl(link.url)) {
     openPdfViewer(link.id, false);
   } else {
-    window.location.href = webViewerPageUrl(link.url);
+    openWebLinkInNewTab(link);
   }
 }
 
 function saveAndRender() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (auth.isLoggedIn) {
+    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(state));
+  }
   render();
 }
 
 function load() {
   try {
+    if (auth.isLoggedIn) {
+      const cloudRaw = localStorage.getItem(cloudStorageKey(auth.userId));
+      if (cloudRaw) {
+        const cloudData = JSON.parse(cloudRaw);
+        if (cloudData && typeof cloudData === "object") {
+          const pdfReading = cloudData.__pdfReading;
+          if (pdfReading && typeof pdfReading === "object") {
+            for (const [k, v] of Object.entries(pdfReading)) {
+              localStorage.setItem(k, String(v));
+            }
+          }
+          delete cloudData.__pdfReading;
+          return cloudData;
+        }
+      }
+    }
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return structuredClone(defaultData);
     return JSON.parse(raw);

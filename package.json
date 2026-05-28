@@ -4,5 +4,8 @@
   "description": "localhost 전용 KeepPoint 최소 예제",
   "scripts": {
     "start": "npx --yes serve@14 . -p 3000"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
   }
 }

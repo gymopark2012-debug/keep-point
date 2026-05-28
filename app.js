@@ -1,3 +1,4 @@
+import { inject } from "@vercel/analytics"
 const STORAGE_KEY = "keepPointDataV2";
 const AUTH_KEY = "keepPointAuthV1";
 const CLOUD_KEY_PREFIX = "keepPointCloudV1_";
@@ -258,6 +259,7 @@ const profileName = document.getElementById("profileName");
 const openLoginBtn = document.getElementById("openLoginBtn");
 const openProfileBtn = document.getElementById("openProfileBtn");
 const quickAddInput = document.getElementById("quickAddInput");
+const quickAddBtn = document.getElementById("quickAddBtn");
 const pdfFileInput = document.getElementById("pdfFileInput");
 const pickPdfBtn = document.getElementById("pickPdfBtn");
 const categoryModal = document.getElementById("categoryModal");
@@ -293,6 +295,7 @@ if (connectExtensionBtn) connectExtensionBtn.addEventListener("click", onConnect
 if (saveAiSummaryBtn) saveAiSummaryBtn.addEventListener("click", onSaveAiSummaryClick);
 if (createShareLinkBtn) createShareLinkBtn.addEventListener("click", onCreateShareLinkClick);
 quickAddInput.addEventListener("keydown", onQuickAdd);
+if (quickAddBtn) quickAddBtn.addEventListener("click", addQuickLinkFromInput);
 if (pickPdfBtn && pdfFileInput) {
   pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
   pdfFileInput.addEventListener("change", onPdfFileSelected);
@@ -452,6 +455,10 @@ function onCreateCategory(event) {
 async function onQuickAdd(event) {
   if (event.key !== "Enter") return;
   event.preventDefault();
+  await addQuickLinkFromInput();
+}
+
+async function addQuickLinkFromInput() {
   const rawUrl = quickAddInput.value.trim();
   if (!rawUrl) return;
 
@@ -1327,3 +1334,4 @@ function escapeAttr(text) {
 }
 
 render();
+inject();

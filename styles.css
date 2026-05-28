@@ -84,6 +84,14 @@ h2 { margin: 0 0 10px; font-size: 18px; }
 
 .quick-add { margin-bottom: 12px; }
 .quick-add label { font-size: 13px; color: #5f6b7d; display: block; margin-bottom: 6px; }
+.quick-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.quick-add-row input {
+  flex: 1;
+}
 .extension-guide {
   margin: 12px 0 16px;
   padding: 12px 14px;

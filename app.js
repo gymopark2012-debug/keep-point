@@ -120,6 +120,81 @@ function getSavedItemCount() {
   return (Array.isArray(state.links) ? state.links.length : 0) + (Array.isArray(state.localPdfs) ? state.localPdfs.length : 0);
 }
 
+function getWebReadTrail(link) {
+  const base = {
+    locationNote: "",
+    selectedText: "",
+    progressPercent: 0,
+    updatedAt: null
+  };
+  if (!link || typeof link !== "object") return base;
+  const t = link.readTrail;
+  if (!t || typeof t !== "object") return base;
+  return {
+    locationNote: typeof t.locationNote === "string" ? t.locationNote : "",
+    selectedText: typeof t.selectedText === "string" ? t.selectedText : "",
+    progressPercent: Number.isFinite(t.progressPercent) ? Math.max(0, Math.min(100, t.progressPercent)) : 0,
+    updatedAt: t.updatedAt || null
+  };
+}
+
+function saveWebReadTrail(link, nextTrail) {
+  if (!link || !nextTrail) return;
+  link.readTrail = {
+    locationNote: String(nextTrail.locationNote || "").trim(),
+    selectedText: String(nextTrail.selectedText || "").trim(),
+    progressPercent: Math.max(0, Math.min(100, Number(nextTrail.progressPercent) || 0)),
+    updatedAt: new Date().toISOString()
+  };
+  saveAndRender();
+}
+
+function getWebMemo(link) {
+  const base = {
+    whySaved: "",
+    keyPoints: "",
+    myThoughts: "",
+    nextPoint: "",
+    tagsText: "",
+    readHint: "",
+    updatedAt: null
+  };
+  if (!link || typeof link !== "object") return base;
+  const m = link.webMemo;
+  if (!m || typeof m !== "object") return base;
+  return {
+    whySaved: typeof m.whySaved === "string" ? m.whySaved : "",
+    keyPoints: typeof m.keyPoints === "string" ? m.keyPoints : "",
+    myThoughts: typeof m.myThoughts === "string" ? m.myThoughts : "",
+    nextPoint: typeof m.nextPoint === "string" ? m.nextPoint : "",
+    tagsText: typeof m.tagsText === "string" ? m.tagsText : "",
+    readHint: typeof m.readHint === "string" ? m.readHint : "",
+    updatedAt: m.updatedAt || null
+  };
+}
+
+function saveWebMemo(link, memoDraft) {
+  if (!link || !memoDraft) return;
+  link.webMemo = {
+    whySaved: String(memoDraft.whySaved || "").trim(),
+    keyPoints: String(memoDraft.keyPoints || "").trim(),
+    myThoughts: String(memoDraft.myThoughts || "").trim(),
+    nextPoint: String(memoDraft.nextPoint || "").trim(),
+    tagsText: String(memoDraft.tagsText || "").trim(),
+    readHint: String(memoDraft.readHint || "").trim(),
+    updatedAt: new Date().toISOString()
+  };
+  // Keep legacy fields for compatibility with existing list/share paths.
+  link.description = [link.webMemo.whySaved, link.webMemo.keyPoints, link.webMemo.myThoughts].filter(Boolean).join(" | ");
+  link.readTrail = {
+    locationNote: link.webMemo.readHint,
+    selectedText: link.readTrail?.selectedText || "",
+    progressPercent: link.readTrail?.progressPercent || 0,
+    updatedAt: link.webMemo.updatedAt
+  };
+  saveAndRender();
+}
+
 const defaultData = {
   profile: { name: "게스트" },
   categories: [
@@ -408,6 +483,8 @@ async function onQuickAdd(event) {
     url: parsed,
     tags: [],
     description: "",
+    webMemo: { whySaved: "", keyPoints: "", myThoughts: "", nextPoint: "", tagsText: "", readHint: "", updatedAt: null },
+    readTrail: { locationNote: "", selectedText: "", progressPercent: 0, updatedAt: null },
     lastVisitedAt: new Date().toISOString()
   };
 
@@ -595,14 +672,20 @@ function renderLinks() {
   currentCategoryTitle.textContent = selectedCategory ? `${selectedCategory.name} 링크` : "전체 링크";
 
   for (const link of getVisibleLinks()) {
+    const memo = getWebMemo(link);
+    const trailLine = memo.readHint || "지난번 위치 기록 없음";
+    const savedLine = memo.updatedAt ? relativeTime(memo.updatedAt) : "기록 없음";
     const li = document.createElement("li");
     li.className = "item";
     if (link.id === state.ui.selectedLinkId) li.classList.add("active");
 
     li.innerHTML = `
       <div>${escapeHtml(link.title)}</div>
-      <div class="meta">📍 마지막 위치: ${relativeTime(link.lastVisitedAt)}</div>
-      <div class="preview">${escapeHtml(shortText(link.description || "설명 없음", 65))}</div>
+      <div class="meta">URL: ${escapeHtml(shortText(link.url || "", 60))}</div>
+      <div class="meta">왜 저장했는지: ${escapeHtml(shortText(memo.whySaved || "미작성", 50))}</div>
+      <div class="meta">핵심 내용: ${escapeHtml(shortText(memo.keyPoints || "미작성", 50))}</div>
+      <div class="meta">지난번 여기까지: ${escapeHtml(shortText(trailLine, 45))}</div>
+      <div class="meta">마지막 저장: ${savedLine}</div>
       <div class="hover-actions">
         <button class="btn" data-action="read">읽기</button>
         <button class="btn ghost" data-action="share">공유</button>
@@ -645,19 +728,38 @@ function renderDetail() {
 
   detailView.classList.remove("empty");
   const isPdf = isPdfUrl(link.url);
+  const webMemo = getWebMemo(link);
   const pdfSnap = isPdf ? getPdfSnapshotFromStorage(link.url) : null;
   const saveStatusText = runtimeSaveStatus[link.id] || "저장됨";
 
   const pdfPageLine =
     pdfSnap && pdfSnap.pageNumber != null ? `마지막 페이지: ${pdfSnap.pageNumber}` : "저장된 페이지 없음";
 
-  const readCardHtml = isPdf
-    ? `<div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
-    : `<div class="resume-card"><strong>웹사이트</strong><p class="meta" style="margin:6px 0 0;">KeepPoint 안의 iframe·내부 reader로는 열지 않습니다. 아래 버튼은 <strong>원문 URL을 새 탭</strong>으로 엽니다. 스크롤·선택 위치는 <strong>KeepPoint Chrome 확장</strong>이 해당 사이트에서 저장·복원합니다.</p><div class="resume-actions"><button type="button" class="btn" id="resumeWebReadBtn">이어 읽기</button></div></div>`;
-
-  const readingBlock = isPdf
-    ? `<p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`
-    : `<p class="meta">일반 웹사이트의 마지막 위치 복원은 KeepPoint 웹앱이 아니라 Chrome 확장프로그램이 처리합니다.</p>`;
+  const webMemoHtml = `
+    <section class="resume-card">
+      <strong>메모 중심 링크 저장</strong>
+      <p class="meta" style="margin:6px 0 0;">일반 웹사이트는 자동 위치 추적/복원을 하지 않습니다. 원문은 새 탭으로 열고, 읽던 흔적은 직접 기록합니다.</p>
+      <label class="trail-field">어디까지 읽었는지 (수동 기록)
+        <input id="webReadHintInput" placeholder="예: 3번째 소제목까지 읽음" value="${escapeAttr(webMemo.readHint)}" />
+      </label>
+      <label class="trail-field">왜 저장했는지
+        <textarea id="webWhySavedInput" rows="2">${escapeHtml(webMemo.whySaved)}</textarea>
+      </label>
+      <label class="trail-field">핵심 내용
+        <textarea id="webKeyPointsInput" rows="3">${escapeHtml(webMemo.keyPoints)}</textarea>
+      </label>
+      <label class="trail-field">내 생각
+        <textarea id="webThoughtsInput" rows="3">${escapeHtml(webMemo.myThoughts)}</textarea>
+      </label>
+      <label class="trail-field">다음에 볼 포인트
+        <textarea id="webNextPointInput" rows="2">${escapeHtml(webMemo.nextPoint)}</textarea>
+      </label>
+      <label class="trail-field">태그 (쉼표로 구분)
+        <input id="webTagsInput" placeholder="예: 역사, 논문, 다시보기" value="${escapeAttr(webMemo.tagsText)}" />
+      </label>
+      <div class="meta">마지막 저장 시간: ${webMemo.updatedAt ? relativeTime(webMemo.updatedAt) : "기록 없음"}</div>
+    </section>
+  `;
 
   detailView.innerHTML = `
     <div class="hover-actions">
@@ -666,21 +768,25 @@ function renderDetail() {
     </div>
     <h3>${escapeHtml(link.title)}</h3>
     <a href="${escapeAttr(link.url)}" target="_blank" rel="noreferrer">원문 링크</a>
-    ${readCardHtml}
+    ${isPdf
+      ? `<div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
+      : webMemoHtml}
     <div class="save-row">
       <span id="saveStatus" class="save-status">${escapeHtml(saveStatusText)}</span>
     </div>
-    <label>
-      태그
-      <div id="selectedTags" class="tag-editor-list"></div>
-      <input id="newTagInput" placeholder="새 태그 입력 후 Enter" />
-      <div id="tagSuggestions" class="tag-suggestions"></div>
-    </label>
-    <label>
-      설명
-      <textarea id="editDescInput" rows="5">${escapeHtml(link.description || "")}</textarea>
-    </label>
-    ${readingBlock}
+    ${isPdf
+      ? `<label>
+          태그
+          <div id="selectedTags" class="tag-editor-list"></div>
+          <input id="newTagInput" placeholder="새 태그 입력 후 Enter" />
+          <div id="tagSuggestions" class="tag-suggestions"></div>
+        </label>
+        <label>
+          설명
+          <textarea id="editDescInput" rows="5">${escapeHtml(link.description || "")}</textarea>
+        </label>
+        <p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`
+      : ""}
     <div class="meta">📍 마지막 방문: ${relativeTime(link.lastVisitedAt)}</div>
   `;
 
@@ -692,7 +798,12 @@ function renderDetail() {
   const openPdfBtn = document.getElementById("openPdfBtn");
   const restartPdfBtn = document.getElementById("restartPdfBtn");
   const clearPdfBtn = document.getElementById("clearPdfBtn");
-  const resumeWebReadBtn = document.getElementById("resumeWebReadBtn");
+  const webReadHintInput = document.getElementById("webReadHintInput");
+  const webWhySavedInput = document.getElementById("webWhySavedInput");
+  const webKeyPointsInput = document.getElementById("webKeyPointsInput");
+  const webThoughtsInput = document.getElementById("webThoughtsInput");
+  const webNextPointInput = document.getElementById("webNextPointInput");
+  const webTagsInput = document.getElementById("webTagsInput");
   let draftDesc = link.description || "";
   let draftTags = [...link.tags];
 
@@ -763,21 +874,23 @@ function renderDetail() {
     });
   };
 
-  renderTagEditor();
-
-  const onDescInput = () => {
-    draftDesc = descInput.value;
-    scheduleAutoSave();
-  };
-  descInput.addEventListener("input", onDescInput);
-
-  const onNewTagKeydown = (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    addTag(newTagInput.value);
-    newTagInput.value = "";
-  };
-  newTagInput.addEventListener("keydown", onNewTagKeydown);
+  let onDescInput = null;
+  let onNewTagKeydown = null;
+  if (isPdf) {
+    renderTagEditor();
+    onDescInput = () => {
+      draftDesc = descInput.value;
+      scheduleAutoSave();
+    };
+    onNewTagKeydown = (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      addTag(newTagInput.value);
+      newTagInput.value = "";
+    };
+    descInput.addEventListener("input", onDescInput);
+    newTagInput.addEventListener("keydown", onNewTagKeydown);
+  }
 
   const onOpenPdfClick = (e) => {
     e.preventDefault();
@@ -795,16 +908,30 @@ function renderDetail() {
     localStorage.removeItem(getPdfReadingStorageKey(link.url));
     saveAndRender();
   };
-  const onResumeWebReadClick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    openWebLinkInNewTab(link);
+  const readWebMemoDraft = () => ({
+    readHint: webReadHintInput?.value || "",
+    whySaved: webWhySavedInput?.value || "",
+    keyPoints: webKeyPointsInput?.value || "",
+    myThoughts: webThoughtsInput?.value || "",
+    nextPoint: webNextPointInput?.value || "",
+    tagsText: webTagsInput?.value || ""
+  });
+  const onWebMemoInput = () => {
+    saveWebMemo(link, readWebMemoDraft());
+    updateStatus("저장됨");
   };
 
   if (openPdfBtn) openPdfBtn.addEventListener("click", onOpenPdfClick);
   if (restartPdfBtn) restartPdfBtn.addEventListener("click", onRestartPdfClick);
   if (clearPdfBtn) clearPdfBtn.addEventListener("click", onClearPdfClick);
-  if (resumeWebReadBtn) resumeWebReadBtn.addEventListener("click", onResumeWebReadClick);
+  if (!isPdf) {
+    if (webReadHintInput) webReadHintInput.addEventListener("blur", onWebMemoInput);
+    if (webWhySavedInput) webWhySavedInput.addEventListener("blur", onWebMemoInput);
+    if (webKeyPointsInput) webKeyPointsInput.addEventListener("blur", onWebMemoInput);
+    if (webThoughtsInput) webThoughtsInput.addEventListener("blur", onWebMemoInput);
+    if (webNextPointInput) webNextPointInput.addEventListener("blur", onWebMemoInput);
+    if (webTagsInput) webTagsInput.addEventListener("blur", onWebMemoInput);
+  }
 
   const onShareClick = () => shareLink(link.id);
   const onDeleteClick = () => deleteLink(link.id);
@@ -816,12 +943,17 @@ function renderDetail() {
   teardownDetailView = () => {
     clearTimeout(autoSaveTimers.get(link.id));
     clearTimeout(readPositionTimers.get(link.id));
-    descInput.removeEventListener("input", onDescInput);
-    newTagInput.removeEventListener("keydown", onNewTagKeydown);
+    if (onDescInput && descInput) descInput.removeEventListener("input", onDescInput);
+    if (onNewTagKeydown && newTagInput) newTagInput.removeEventListener("keydown", onNewTagKeydown);
     if (openPdfBtn) openPdfBtn.removeEventListener("click", onOpenPdfClick);
     if (restartPdfBtn) restartPdfBtn.removeEventListener("click", onRestartPdfClick);
     if (clearPdfBtn) clearPdfBtn.removeEventListener("click", onClearPdfClick);
-    if (resumeWebReadBtn) resumeWebReadBtn.removeEventListener("click", onResumeWebReadClick);
+    if (webReadHintInput) webReadHintInput.removeEventListener("blur", onWebMemoInput);
+    if (webWhySavedInput) webWhySavedInput.removeEventListener("blur", onWebMemoInput);
+    if (webKeyPointsInput) webKeyPointsInput.removeEventListener("blur", onWebMemoInput);
+    if (webThoughtsInput) webThoughtsInput.removeEventListener("blur", onWebMemoInput);
+    if (webNextPointInput) webNextPointInput.removeEventListener("blur", onWebMemoInput);
+    if (webTagsInput) webTagsInput.removeEventListener("blur", onWebMemoInput);
     shareCurrentBtn.removeEventListener("click", onShareClick);
     deleteCurrentBtn.removeEventListener("click", onDeleteClick);
   };
@@ -869,11 +1001,17 @@ function shareLink(linkId) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
   const category = state.categories.find((item) => item.id === link.categoryId);
+  const memo = getWebMemo(link);
   const payload = [
     `카테고리: ${category?.name || "없음"}`,
     `제목: ${link.title}`,
     `링크: ${link.url}`,
-    `설명: ${link.description || "없음"}`
+    `왜 저장했는지: ${memo.whySaved || "없음"}`,
+    `핵심 내용: ${memo.keyPoints || "없음"}`,
+    `내 생각: ${memo.myThoughts || "없음"}`,
+    `다음에 볼 포인트: ${memo.nextPoint || "없음"}`,
+    `태그: ${memo.tagsText || "없음"}`,
+    `어디까지 읽었는지: ${memo.readHint || "없음"}`
   ].join("\n");
   navigator.clipboard
     .writeText(payload)
@@ -901,6 +1039,27 @@ function normalizeState() {
   if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
   if (!state.profile || typeof state.profile !== "object") state.profile = { name: "게스트" };
   if (!state.ui.loginPromptedForLimit) state.ui.loginPromptedForLimit = false;
+  for (const link of state.links || []) {
+    if (!link.webMemo || typeof link.webMemo !== "object") {
+      const legacyTrail = getWebReadTrail(link);
+      link.webMemo = {
+        whySaved: "",
+        keyPoints: "",
+        myThoughts: "",
+        nextPoint: "",
+        tagsText: Array.isArray(link.tags) ? link.tags.join(", ") : "",
+        readHint: legacyTrail.locationNote || "",
+        updatedAt: legacyTrail.updatedAt || null
+      };
+    } else {
+      link.webMemo = getWebMemo(link);
+    }
+    if (!link.readTrail || typeof link.readTrail !== "object") {
+      link.readTrail = { locationNote: "", selectedText: "", progressPercent: 0, updatedAt: null };
+    } else {
+      link.readTrail = getWebReadTrail(link);
+    }
+  }
   if (!state.ui.readPositions) state.ui.readPositions = {};
   for (const [linkId, value] of Object.entries(state.ui.readPositions)) {
     if (typeof value === "number") {

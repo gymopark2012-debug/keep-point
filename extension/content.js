@@ -2,12 +2,9 @@
   const proto = location.protocol;
   if (proto !== "http:" && proto !== "https:") return;
 
-  const SCROLL_SAVE_INTERVAL_MS = 1000;
-  const SELECTION_DEBOUNCE_MS = 350;
-  const MAX_TEXT_FIELD = 8000;
-  const MAX_CENTER_LEN = 400;
-
-  const storageKey = () => `keepPoint_ext_reading_${encodeURIComponent(location.href)}`;
+  const STORAGE_KEY = "keepPoint_extension_clips";
+  const MAX_ITEMS = 300;
+  const MAX_TEXT = 8000;
 
   const style = document.createElement("style");
   style.textContent = `
@@ -50,247 +47,54 @@
   const fab = document.createElement("button");
   fab.type = "button";
   fab.className = "keeppoint-fab";
-  fab.setAttribute("aria-label", "KeepPoint 마지막 위치로 이동");
+  fab.setAttribute("aria-label", "Save to KeepPoint");
+  fab.textContent = "Save to KeepPoint";
   document.documentElement.appendChild(fab);
 
-  let pending = null;
-  let lastScrollPersistAt = 0;
-  let scrollTimer = null;
-  let selectionTimer = null;
-  let restoreAttempts = 0;
-  const MAX_AUTO_RESTORE = 3;
-
-  function getScrollMetrics() {
-    const root = document.scrollingElement || document.documentElement;
-    const maxY = Math.max(0, root.scrollHeight - root.clientHeight);
-    const scrollY = Math.min(Math.max(0, window.scrollY), maxY);
-    const scrollPercent = maxY > 0 ? Math.round((scrollY / maxY) * 10000) / 100 : 0;
-    return { scrollY, scrollPercent, maxY };
-  }
-
-  function getCenterText() {
-    const x = Math.floor(window.innerWidth / 2);
-    const y = Math.floor(window.innerHeight / 2);
+  function getSelectionText() {
     try {
-      if (document.caretRangeFromPoint) {
-        const range = document.caretRangeFromPoint(x, y);
-        if (range && range.startContainer) {
-          const sc = range.startContainer;
-          if (sc.nodeType === Node.TEXT_NODE) {
-            const t = sc.nodeValue || "";
-            const off = range.startOffset;
-            const start = Math.max(0, off - 70);
-            const end = Math.min(t.length, off + 70);
-            return t.slice(start, end).replace(/\s+/g, " ").trim().slice(0, MAX_CENTER_LEN);
-          }
-          const el = sc.nodeType === Node.ELEMENT_NODE ? sc : sc.parentElement;
-          const chunk = (el && el.textContent) || "";
-          return chunk.replace(/\s+/g, " ").trim().slice(0, MAX_CENTER_LEN);
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-    return "";
-  }
-
-  function getLiveSelectionText() {
-    try {
-      const sel = window.getSelection();
-      return (sel && sel.toString()) || "";
+      const s = window.getSelection()?.toString() || "";
+      return String(s).trim().slice(0, MAX_TEXT);
     } catch {
       return "";
     }
   }
 
-  function buildRecord(prev) {
-    const m = getScrollMetrics();
-    const liveSel = getLiveSelectionText().trim();
-    const selectedText = (liveSel || (prev && prev.selectedText) || "").trim().slice(0, MAX_TEXT_FIELD);
-    let centerText = getCenterText();
-    if (!centerText && prev && prev.centerText) centerText = String(prev.centerText);
-    centerText = String(centerText).slice(0, MAX_CENTER_LEN);
+  async function saveClip() {
+    const selectedText = getSelectionText();
+    const memo = window.prompt("KeepPoint에 저장할 메모를 입력하세요.", "") || "";
+    const progressText = window.prompt("읽은 퍼센트(0~100)를 입력하세요. (선택)", "") || "";
+    const progressPercent = Math.max(0, Math.min(100, Number(progressText) || 0));
     return {
       url: location.href,
       title: document.title,
-      scrollY: m.scrollY,
-      scrollPercent: m.scrollPercent,
+      progressPercent,
+      memo: String(memo).trim().slice(0, MAX_TEXT),
       selectedText,
-      centerText,
       updatedAt: new Date().toISOString()
     };
   }
 
-  async function loadRecord() {
-    const key = storageKey();
-    const bag = await chrome.storage.local.get(key);
-    return bag[key] || null;
-  }
-
-  async function saveRecord(rec) {
-    const key = storageKey();
-    await chrome.storage.local.set({ [key]: rec });
-    pending = rec;
-    updateFab(rec);
-  }
-
-  async function persistFromPrev(prevBag) {
-    const prev = prevBag || pending || (await loadRecord());
-    const rec = buildRecord(prev);
-    await saveRecord(rec);
-  }
-
-  function scheduleScrollPersist() {
-    const now = Date.now();
-    const elapsed = now - lastScrollPersistAt;
-    if (elapsed >= SCROLL_SAVE_INTERVAL_MS) {
-      lastScrollPersistAt = now;
-      clearTimeout(scrollTimer);
-      scrollTimer = null;
-      persistFromPrev(null).catch(() => {});
-      return;
-    }
-    clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(() => {
-      lastScrollPersistAt = Date.now();
-      scrollTimer = null;
-      persistFromPrev(null).catch(() => {});
-    }, SCROLL_SAVE_INTERVAL_MS - elapsed);
-  }
-
-  function scheduleSelectionPersist() {
-    clearTimeout(selectionTimer);
-    selectionTimer = setTimeout(() => {
-      const t = getLiveSelectionText().trim();
-      if (t.length < 1) return;
-      persistFromPrev(null).catch(() => {});
-    }, SELECTION_DEBOUNCE_MS);
-  }
-
-  function tryScrollToSelectedText(text, behavior) {
-    const intoViewBehavior = behavior === "smooth" ? "smooth" : "auto";
-    const raw = (text || "").trim();
-    if (raw.length < 2) return false;
-    const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    const candidates = [
-      raw.slice(0, 500),
-      lines[0] || "",
-      raw.replace(/\s+/g, " ").trim().slice(0, 200)
-    ].filter((s) => s.length >= 2);
-    for (const query of candidates) {
-      try {
-        window.getSelection()?.removeAllRanges();
-        const found =
-          typeof window.find === "function" &&
-          window.find(query, false, false, true, false, false, false);
-        if (found) {
-          const sel = window.getSelection();
-          if (sel && sel.rangeCount > 0) {
-            const start = sel.getRangeAt(0).startContainer;
-            const el =
-              start.nodeType === Node.ELEMENT_NODE
-                ? start
-                : start.parentElement && start.parentElement.nodeType === Node.ELEMENT_NODE
-                  ? start.parentElement
-                  : null;
-            if (el) {
-              el.scrollIntoView({ block: "center", behavior: intoViewBehavior });
-              return true;
-            }
-          }
-        }
-      } catch {
-        /* try next candidate */
-      }
-    }
-    return false;
-  }
-
-  function restoreFromRecord(rec, behavior) {
-    if (!rec) return;
-    const scrollBehavior = behavior === "smooth" ? "smooth" : "auto";
-    const root = document.scrollingElement || document.documentElement;
-    const maxY = Math.max(0, root.scrollHeight - root.clientHeight);
-
-    if (rec.selectedText && tryScrollToSelectedText(rec.selectedText, scrollBehavior)) {
-      return;
-    }
-    if (Number.isFinite(rec.scrollY) && rec.scrollY >= 0 && maxY >= 0) {
-      window.scrollTo({
-        top: Math.min(Math.max(0, rec.scrollY), maxY),
-        behavior: scrollBehavior
-      });
-      return;
-    }
-    if (Number.isFinite(rec.scrollPercent) && rec.scrollPercent >= 0 && maxY > 0) {
-      window.scrollTo({
-        top: (Math.min(100, Math.max(0, rec.scrollPercent)) / 100) * maxY,
-        behavior: scrollBehavior
-      });
-    }
-  }
-
-  function escapeHtml(s) {
-    return String(s)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
-  }
-
-  function updateFab(rec) {
-    if (!rec) {
-      fab.classList.remove("visible");
-      fab.innerHTML = "";
-      return;
-    }
-    fab.innerHTML = `<div><strong>KeepPoint 마지막 위치로 이동</strong></div><div class="kp-line">${escapeHtml(rec.title || "")}</div>`;
+  function updateFabStatus(text) {
+    fab.textContent = text;
     fab.classList.add("visible");
+    window.setTimeout(() => {
+      fab.textContent = "Save to KeepPoint";
+    }, 1500);
   }
 
-  window.addEventListener("scroll", scheduleScrollPersist, { passive: true });
-
-  document.addEventListener("selectionchange", () => {
-    scheduleSelectionPersist();
+  fab.classList.add("visible");
+  fab.addEventListener("click", async () => {
+    try {
+      const item = await saveClip();
+      const bag = await chrome.storage.local.get(STORAGE_KEY);
+      const arr = Array.isArray(bag[STORAGE_KEY]) ? bag[STORAGE_KEY] : [];
+      arr.unshift(item);
+      const trimmed = arr.slice(0, MAX_ITEMS);
+      await chrome.storage.local.set({ [STORAGE_KEY]: trimmed });
+      updateFabStatus("KeepPoint 저장 완료");
+    } catch {
+      updateFabStatus("저장 실패");
+    }
   });
-
-  document.addEventListener("mouseup", () => {
-    scheduleSelectionPersist();
-  });
-
-  fab.addEventListener("click", () => {
-    loadRecord()
-      .then((rec) => {
-        pending = rec;
-        if (rec) restoreFromRecord(rec, "smooth");
-      })
-      .catch(() => {});
-  });
-
-  function scheduleInitialPersist() {
-    const run = () => setTimeout(() => persistFromPrev(null).catch(() => {}), 400);
-    if (document.readyState === "complete") run();
-    else window.addEventListener("load", run, { once: true });
-  }
-
-  function scheduleAutoRestore(rec) {
-    const delays = [450, 1400, 2800];
-    delays.forEach((ms) => {
-      setTimeout(() => {
-        if (restoreAttempts >= MAX_AUTO_RESTORE) return;
-        restoreAttempts += 1;
-        restoreFromRecord(rec, "auto");
-      }, ms);
-    });
-  }
-
-  loadRecord()
-    .then((rec) => {
-      pending = rec;
-      updateFab(rec);
-      if (rec) scheduleAutoRestore(rec);
-    })
-    .catch(() => {});
-
-  scheduleInitialPersist();
 })();

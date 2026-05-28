@@ -1,4 +1,3 @@
-import { inject } from "@vercel/analytics"
 const STORAGE_KEY = "keepPointDataV2";
 const AUTH_KEY = "keepPointAuthV1";
 const CLOUD_KEY_PREFIX = "keepPointCloudV1_";
@@ -280,12 +279,16 @@ const connectExtensionBtn = document.getElementById("connectExtensionBtn");
 const saveAiSummaryBtn = document.getElementById("saveAiSummaryBtn");
 const createShareLinkBtn = document.getElementById("createShareLinkBtn");
 
-document.getElementById("addCategoryBtn").addEventListener("click", () => {
-  categoryNameInput.value = "";
-  categoryModal.showModal();
-});
-document.getElementById("deleteCategoryBtn").addEventListener("click", deleteSelectedCategory);
-categoryForm.addEventListener("submit", onCreateCategory);
+const addCategoryBtn = document.getElementById("addCategoryBtn");
+const deleteCategoryBtn = document.getElementById("deleteCategoryBtn");
+if (addCategoryBtn) {
+  addCategoryBtn.addEventListener("click", () => {
+    if (categoryNameInput) categoryNameInput.value = "";
+    categoryModal?.showModal();
+  });
+}
+if (deleteCategoryBtn) deleteCategoryBtn.addEventListener("click", deleteSelectedCategory);
+if (categoryForm) categoryForm.addEventListener("submit", onCreateCategory);
 if (openLoginBtn) openLoginBtn.addEventListener("click", () => openLoginModal("manual"));
 if (openProfileBtn) openProfileBtn.addEventListener("click", openProfileModal);
 if (loginForm) loginForm.addEventListener("submit", onLoginSubmit);
@@ -294,7 +297,7 @@ if (syncAcrossDevicesBtn) syncAcrossDevicesBtn.addEventListener("click", onSyncA
 if (connectExtensionBtn) connectExtensionBtn.addEventListener("click", onConnectExtensionClick);
 if (saveAiSummaryBtn) saveAiSummaryBtn.addEventListener("click", onSaveAiSummaryClick);
 if (createShareLinkBtn) createShareLinkBtn.addEventListener("click", onCreateShareLinkClick);
-quickAddInput.addEventListener("keydown", onQuickAdd);
+if (quickAddInput) quickAddInput.addEventListener("keydown", onQuickAdd);
 if (quickAddBtn) quickAddBtn.addEventListener("click", addQuickLinkFromInput);
 if (pickPdfBtn && pdfFileInput) {
   pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
@@ -566,7 +569,7 @@ async function onPdfFileSelected() {
 }
 
 function render() {
-  profileName.textContent = auth.isLoggedIn ? `${state.profile.name}` : "게스트";
+  if (profileName) profileName.textContent = auth.isLoggedIn ? `${state.profile.name}` : "게스트";
   if (openLoginBtn) openLoginBtn.textContent = auth.isLoggedIn ? "다른 계정 로그인" : "로그인";
   if (openLoginBtn) openLoginBtn.disabled = false;
   if (openProfileBtn) openProfileBtn.disabled = !auth.isLoggedIn;
@@ -944,8 +947,8 @@ function renderDetail() {
   const onDeleteClick = () => deleteLink(link.id);
   const shareCurrentBtn = document.getElementById("shareCurrentBtn");
   const deleteCurrentBtn = document.getElementById("deleteCurrentBtn");
-  shareCurrentBtn.addEventListener("click", onShareClick);
-  deleteCurrentBtn.addEventListener("click", onDeleteClick);
+  if (shareCurrentBtn) shareCurrentBtn.addEventListener("click", onShareClick);
+  if (deleteCurrentBtn) deleteCurrentBtn.addEventListener("click", onDeleteClick);
 
   teardownDetailView = () => {
     clearTimeout(autoSaveTimers.get(link.id));
@@ -961,8 +964,8 @@ function renderDetail() {
     if (webThoughtsInput) webThoughtsInput.removeEventListener("blur", onWebMemoInput);
     if (webNextPointInput) webNextPointInput.removeEventListener("blur", onWebMemoInput);
     if (webTagsInput) webTagsInput.removeEventListener("blur", onWebMemoInput);
-    shareCurrentBtn.removeEventListener("click", onShareClick);
-    deleteCurrentBtn.removeEventListener("click", onDeleteClick);
+    if (shareCurrentBtn) shareCurrentBtn.removeEventListener("click", onShareClick);
+    if (deleteCurrentBtn) deleteCurrentBtn.removeEventListener("click", onDeleteClick);
   };
 }
 
@@ -1334,4 +1337,3 @@ function escapeAttr(text) {
 }
 
 render();
-inject();

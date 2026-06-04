@@ -19,11 +19,29 @@
       <button type="button" id="prevPage" class="btn">이전 페이지</button>
       <span id="pageLabel" class="pv-page">1 / ?</span>
       <button type="button" id="nextPage" class="btn">다음 페이지</button>
+      <span class="pv-toolbar-divider"></span>
+      <button type="button" id="toolHighlight" class="btn tool-btn active" data-tool="highlight">밑줄</button>
+      <button type="button" id="toolMemo" class="btn tool-btn ghost" data-tool="memo">메모</button>
+      <button type="button" id="toolSelect" class="btn tool-btn ghost" data-tool="select">선택</button>
+      <button type="button" id="deleteAnnotationBtn" class="btn danger ghost" disabled>삭제</button>
     </div>
 
     <div id="pdfScroll" class="pv-scroll">
-      <canvas id="pdfCanvas"></canvas>
+      <div id="pdfStage" class="pv-stage">
+        <canvas id="pdfCanvas"></canvas>
+        <div id="annotationLayer" class="pv-annotation-layer"></div>
+        <div id="dragPreview" class="pv-drag-preview hidden"></div>
+      </div>
     </div>
+
+    <aside id="memoPanel" class="pv-memo-panel hidden">
+      <h3>메모</h3>
+      <textarea id="memoEditor" rows="6" placeholder="이 위치에 남길 메모를 입력하세요."></textarea>
+      <div class="pv-memo-actions">
+        <button type="button" id="memoSaveBtn" class="btn">저장</button>
+        <button type="button" id="memoCancelBtn" class="btn ghost">취소</button>
+      </div>
+    </aside>
 
     <p id="pdfError" class="pv-error hidden"></p>
 

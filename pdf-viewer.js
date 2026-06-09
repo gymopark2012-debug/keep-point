@@ -1,5 +1,6 @@
 (async () => {
   const PDF_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const HIGHLIGHT_WIDTH = 22;
 
   const IDB_NAME = "keepPointDB";
   const IDB_VERSION = 1;
@@ -41,15 +42,14 @@
   const nextPage = document.getElementById("nextPage");
   const pageLabel = document.getElementById("pageLabel");
   const pdfScroll = document.getElementById("pdfScroll");
-  const pdfCanvas = document.getElementById("pdfCanvas");
   const pdfStage = document.getElementById("pdfStage");
+  const pdfCanvas = document.getElementById("pdfCanvas");
+  const annotationSvg = document.getElementById("annotationSvg");
   const annotationLayer = document.getElementById("annotationLayer");
-  const dragPreview = document.getElementById("dragPreview");
   const pdfError = document.getElementById("pdfError");
-  const toolHighlight = document.getElementById("toolHighlight");
+  const toolPen = document.getElementById("toolPen");
   const toolMemo = document.getElementById("toolMemo");
-  const toolSelect = document.getElementById("toolSelect");
-  const deleteAnnotationBtn = document.getElementById("deleteAnnotationBtn");
+  const deleteAllBtn = document.getElementById("deleteAllBtn");
   const memoPanel = document.getElementById("memoPanel");
   const memoEditor = document.getElementById("memoEditor");
   const memoSaveBtn = document.getElementById("memoSaveBtn");
@@ -64,12 +64,11 @@
   let currentPage = 1;
   let pdfDoc = null;
   let totalPages = 0;
-  let currentTool = "highlight";
+  let currentTool = "pen";
   let annotationsByPage = {};
-  let selectedAnnotationId = null;
   let pendingMemo = null;
-  let dragState = null;
-  let pageTextItems = [];
+  let penState = null;
+  let livePenPath = null;
 
   function getStorageKey() {
     if (localIdMode && localId) {
@@ -139,25 +138,53 @@
     return annotationsByPage[key];
   }
 
-  function getLayerSize() {
+  function getDisplayMetrics() {
+    const rect = pdfCanvas.getBoundingClientRect();
     return {
-      width: pdfCanvas.clientWidth || pdfCanvas.width,
-      height: pdfCanvas.clientHeight || pdfCanvas.height
+      width: Math.max(1, rect.width),
+      height: Math.max(1, rect.height),
+      left: rect.left,
+      top: rect.top
     };
   }
 
-  function normRect(x1, y1, x2, y2) {
+  function getLayerSize() {
+    const { width, height } = getDisplayMetrics();
+    return { width, height };
+  }
+
+  function syncAnnotationOverlay() {
+    const { width, height } = getDisplayMetrics();
+    const w = `${width}px`;
+    const h = `${height}px`;
+    if (pdfStage) {
+      pdfStage.style.width = w;
+      pdfStage.style.height = h;
+    }
+    annotationLayer.style.width = w;
+    annotationLayer.style.height = h;
+    annotationLayer.style.left = "0";
+    annotationLayer.style.top = "0";
+    annotationSvg.style.width = w;
+    annotationSvg.style.height = h;
+    annotationSvg.style.left = "0";
+    annotationSvg.style.top = "0";
+    annotationSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    annotationSvg.removeAttribute("width");
+    annotationSvg.removeAttribute("height");
+  }
+
+  function normPoint(x, y) {
     const { width, height } = getLayerSize();
-    const left = Math.min(x1, x2) / width;
-    const top = Math.min(y1, y2) / height;
-    const w = Math.abs(x2 - x1) / width;
-    const h = Math.abs(y2 - y1) / height;
     return {
-      left: Math.max(0, Math.min(1, left)),
-      top: Math.max(0, Math.min(1, top)),
-      width: Math.max(0.005, Math.min(1, w)),
-      height: Math.max(0.008, Math.min(1, h))
+      x: Math.max(0, Math.min(1, x / width)),
+      y: Math.max(0, Math.min(1, y / height))
     };
+  }
+
+  function pointToPx(p) {
+    const { width, height } = getLayerSize();
+    return { x: p.x * width, y: p.y * height };
   }
 
   function rectToPx(rect) {
@@ -170,62 +197,26 @@
     };
   }
 
-  async function loadPageTextItems(pageNum) {
-    if (!pdfDoc) return [];
-    try {
-      const page = await pdfDoc.getPage(pageNum);
-      const content = await page.getTextContent();
-      const viewport = page.getViewport({ scale: 1.35 });
-      const items = [];
-      for (const item of content.items) {
-        if (!item.str || !item.transform) continue;
-        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-        const fontHeight = Math.hypot(tx[2], tx[3]);
-        const x = tx[4];
-        const y = tx[5] - fontHeight;
-        const w = item.width * viewport.scale;
-        const h = fontHeight * 1.2;
-        items.push({ text: item.str, x, y, w, h });
-      }
-      return items;
-    } catch {
-      return [];
+  function pointsToPathD(points) {
+    if (!points.length) return "";
+    const px = points.map(pointToPx);
+    let d = `M ${px[0].x} ${px[0].y}`;
+    for (let i = 1; i < px.length; i += 1) {
+      d += ` L ${px[i].x} ${px[i].y}`;
     }
-  }
-
-  function extractTextInRect(rect) {
-    const px = rectToPx(rect);
-    const x2 = px.left + px.width;
-    const y2 = px.top + px.height;
-    const parts = [];
-    for (const item of pageTextItems) {
-      const ix2 = item.x + item.w;
-      const iy2 = item.y + item.h;
-      const overlap =
-        item.x < x2 && ix2 > px.left && item.y < y2 && iy2 > px.top;
-      if (overlap) parts.push(item.text);
-    }
-    return parts.join(" ").replace(/\s+/g, " ").trim();
+    return d;
   }
 
   function setTool(tool) {
     currentTool = tool;
-    [toolHighlight, toolMemo, toolSelect].forEach((btn) => {
+    [toolPen, toolMemo].forEach((btn) => {
       if (!btn) return;
       btn.classList.toggle("active", btn.dataset.tool === tool);
       btn.classList.toggle("ghost", btn.dataset.tool !== tool);
     });
-    annotationLayer.classList.toggle("tool-select", tool === "select");
+    annotationLayer.classList.toggle("tool-pen", tool === "pen");
     annotationLayer.classList.toggle("tool-memo", tool === "memo");
     if (tool !== "memo") closeMemoPanel();
-  }
-
-  function selectAnnotation(id) {
-    selectedAnnotationId = id;
-    if (deleteAnnotationBtn) deleteAnnotationBtn.disabled = !id;
-    annotationLayer.querySelectorAll("[data-ann-id]").forEach((el) => {
-      el.classList.toggle("selected", el.dataset.annId === id);
-    });
   }
 
   function closeMemoPanel() {
@@ -249,48 +240,82 @@
       return;
     }
     const pageAnns = getPageAnnotations(pendingMemo.page);
-    if (pendingMemo.id) {
-      const existing = pageAnns.find((a) => a.id === pendingMemo.id);
-      if (existing) {
-        existing.note = note;
-        existing.updatedAt = new Date().toISOString();
-      }
-    } else {
-      pageAnns.push({
-        id: createId("m"),
-        type: "memo",
-        left: pendingMemo.left,
-        top: pendingMemo.top,
-        note,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      });
-    }
+    pageAnns.push({
+      id: createId("m"),
+      type: "memo",
+      left: pendingMemo.left,
+      top: pendingMemo.top,
+      note,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
     closeMemoPanel();
     persistState();
     renderAnnotations();
   }
 
-  function deleteSelectedAnnotation() {
-    if (!selectedAnnotationId) return;
-    const pageAnns = getPageAnnotations(currentPage);
-    const idx = pageAnns.findIndex((a) => a.id === selectedAnnotationId);
+  function deleteAnnotationById(id, pageNum) {
+    const page = pageNum ?? currentPage;
+    const pageAnns = getPageAnnotations(page);
+    const idx = pageAnns.findIndex((a) => a.id === id);
     if (idx < 0) return;
     pageAnns.splice(idx, 1);
-    selectAnnotation(null);
+    persistState();
+    renderAnnotations();
+  }
+
+  function deleteAllAnnotations() {
+    const total = Object.values(annotationsByPage).reduce(
+      (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+      0
+    );
+    if (total === 0) {
+      alert("삭제할 밑줄·메모가 없습니다.");
+      return;
+    }
+    if (!confirm(`모든 페이지의 밑줄·메모 ${total}개를 전부 삭제할까요?`)) return;
+    annotationsByPage = {};
+    closeMemoPanel();
     persistState();
     renderAnnotations();
   }
 
   function renderAnnotations() {
+    syncAnnotationOverlay();
+    annotationSvg.innerHTML = "";
     annotationLayer.innerHTML = "";
-    const { width, height } = getLayerSize();
-    annotationLayer.style.width = `${width}px`;
-    annotationLayer.style.height = `${height}px`;
 
     const pageAnns = getPageAnnotations(currentPage);
     for (const ann of pageAnns) {
-      if (ann.type === "underline" || ann.type === "highlight") {
+      if (ann.type === "pen" && Array.isArray(ann.points) && ann.points.length > 1) {
+        const strokeW =
+          !ann.strokeWidth || ann.strokeWidth < 10 ? HIGHLIGHT_WIDTH : ann.strokeWidth;
+        const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        g.dataset.annId = ann.id;
+
+        const pathD = pointsToPathD(ann.points);
+
+        const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        hit.setAttribute("d", pathD);
+        hit.setAttribute("fill", "none");
+        hit.setAttribute("class", "pv-pen-hit");
+        hit.setAttribute("stroke", "transparent");
+        hit.setAttribute("stroke-width", String(strokeW + 14));
+        hit.addEventListener("click", (e) => {
+          e.stopPropagation();
+          deleteAnnotationById(ann.id);
+        });
+
+        const visible = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        visible.setAttribute("d", pathD);
+        visible.setAttribute("fill", "none");
+        visible.setAttribute("class", "pv-highlighter-stroke");
+        visible.setAttribute("stroke-width", String(strokeW));
+
+        g.appendChild(hit);
+        g.appendChild(visible);
+        annotationSvg.appendChild(g);
+      } else if (ann.type === "underline" || ann.type === "highlight") {
         const px = rectToPx(ann);
         const el = document.createElement("div");
         el.className = "pv-highlight";
@@ -299,127 +324,138 @@
         el.style.top = `${px.top}px`;
         el.style.width = `${px.width}px`;
         el.style.height = `${px.height}px`;
-        el.title = ann.text || "밑줄";
+        el.title = "클릭하면 삭제";
         el.addEventListener("click", (e) => {
           e.stopPropagation();
-          setTool("select");
-          selectAnnotation(ann.id);
+          deleteAnnotationById(ann.id);
         });
         annotationLayer.appendChild(el);
       } else if (ann.type === "memo") {
-        const px = rectToPx({ left: ann.left, top: ann.top, width: 0, height: 0 });
+        const px = pointToPx({ x: ann.left, y: ann.top });
         const el = document.createElement("button");
         el.type = "button";
         el.className = "pv-memo-pin";
         el.dataset.annId = ann.id;
-        el.style.left = `${px.left}px`;
-        el.style.top = `${px.top}px`;
+        el.style.left = `${px.x}px`;
+        el.style.top = `${px.y}px`;
         el.textContent = "M";
         el.dataset.preview = ann.note || "";
-        el.title = ann.note || "메모";
+        el.title = `${ann.note || "메모"} (클릭하면 삭제)`;
         el.addEventListener("click", (e) => {
           e.stopPropagation();
-          setTool("select");
-          selectAnnotation(ann.id);
-          openMemoPanel({
-            id: ann.id,
-            page: currentPage,
-            left: ann.left,
-            top: ann.top,
-            note: ann.note
-          });
+          deleteAnnotationById(ann.id);
         });
         annotationLayer.appendChild(el);
       }
     }
-    if (selectedAnnotationId) {
-      selectAnnotation(selectedAnnotationId);
-    }
   }
 
   function layerCoords(event) {
-    const rect = annotationLayer.getBoundingClientRect();
+    const { left, top } = getDisplayMetrics();
     return {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top
+      x: event.clientX - left,
+      y: event.clientY - top
     };
+  }
+
+  function pointsToPathDFromPx(points) {
+    if (!points.length) return "";
+    let d = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length; i += 1) {
+      d += ` L ${points[i].x} ${points[i].y}`;
+    }
+    return d;
+  }
+
+  function startLivePen(points) {
+    syncAnnotationOverlay();
+    if (livePenPath) livePenPath.remove();
+    livePenPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    livePenPath.setAttribute("fill", "none");
+    livePenPath.setAttribute("class", "pv-highlighter-live");
+    livePenPath.setAttribute("stroke-width", String(HIGHLIGHT_WIDTH));
+    livePenPath.setAttribute("d", pointsToPathDFromPx(points));
+    annotationSvg.appendChild(livePenPath);
+  }
+
+  function updateLivePen(points) {
+    if (!livePenPath) return;
+    syncAnnotationOverlay();
+    livePenPath.setAttribute("d", pointsToPathDFromPx(points));
+  }
+
+  function clearLivePen() {
+    if (livePenPath) {
+      livePenPath.remove();
+      livePenPath = null;
+    }
   }
 
   function onLayerPointerDown(event) {
     if (event.button !== 0) return;
-    const target = event.target.closest("[data-ann-id]");
-    if (target && currentTool === "select") {
-      selectAnnotation(target.dataset.annId);
-      return;
-    }
-    if (currentTool === "highlight") {
+    if (event.target.closest("[data-ann-id]")) return;
+
+    if (currentTool === "pen") {
+      syncAnnotationOverlay();
       const { x, y } = layerCoords(event);
-      dragState = { x1: x, y1: y, x2: x, y2: y };
-      dragPreview.classList.remove("hidden");
-      updateDragPreview();
+      penState = { points: [{ x, y }] };
+      startLivePen(penState.points);
       event.preventDefault();
       return;
     }
     if (currentTool === "memo") {
-      const { width, height } = getLayerSize();
       const { x, y } = layerCoords(event);
+      const n = normPoint(x, y);
       openMemoPanel({
         page: currentPage,
-        left: Math.max(0, Math.min(1, x / width)),
-        top: Math.max(0, Math.min(1, y / height)),
+        left: n.x,
+        top: n.y,
         note: ""
       });
       event.preventDefault();
     }
   }
 
-  function updateDragPreview() {
-    if (!dragState) return;
-    const px = {
-      left: Math.min(dragState.x1, dragState.x2),
-      top: Math.min(dragState.y1, dragState.y2),
-      width: Math.abs(dragState.x2 - dragState.x1),
-      height: Math.abs(dragState.y2 - dragState.y1)
-    };
-    dragPreview.style.left = `${px.left}px`;
-    dragPreview.style.top = `${px.top}px`;
-    dragPreview.style.width = `${px.width}px`;
-    dragPreview.style.height = `${px.height}px`;
-  }
-
   function onLayerPointerMove(event) {
-    if (!dragState) return;
+    if (!penState) return;
     const { x, y } = layerCoords(event);
-    dragState.x2 = x;
-    dragState.y2 = y;
-    updateDragPreview();
+    const last = penState.points[penState.points.length - 1];
+    if (Math.hypot(x - last.x, y - last.y) < 1.5) return;
+    penState.points.push({ x, y });
+    updateLivePen(penState.points);
   }
 
   function onLayerPointerUp() {
-    if (!dragState) return;
-    const { width, height } = getLayerSize();
-    const minSize = 6;
-    if (
-      Math.abs(dragState.x2 - dragState.x1) < minSize &&
-      Math.abs(dragState.y2 - dragState.y1) < minSize
-    ) {
-      dragState = null;
-      dragPreview.classList.add("hidden");
+    if (!penState) return;
+    clearLivePen();
+    if (penState.points.length < 2) {
+      penState = null;
       return;
     }
-    const rect = normRect(dragState.x1, dragState.y1, dragState.x2, dragState.y2);
-    const text = extractTextInRect(rect);
+    const normalized = penState.points.map((p) => normPoint(p.x, p.y));
     getPageAnnotations(currentPage).push({
-      id: createId("u"),
-      type: "underline",
-      ...rect,
-      text,
+      id: createId("p"),
+      type: "pen",
+      points: normalized,
+      strokeWidth: HIGHLIGHT_WIDTH,
       createdAt: new Date().toISOString()
     });
-    dragState = null;
-    dragPreview.classList.add("hidden");
+    penState = null;
     persistState();
     renderAnnotations();
+  }
+
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
+  }
+
+  async function goToPage(delta) {
+    const next = currentPage + delta;
+    if (next < 1 || next > totalPages) return;
+    currentPage = next;
+    await renderPage().catch((e) => showErr(e));
   }
 
   if (typeof pdfjsLib !== "undefined") {
@@ -436,16 +472,41 @@
     pdfError.textContent = err && err.message ? String(err.message) : "PDF 로드 실패";
   }
 
-  toolHighlight?.addEventListener("click", () => setTool("highlight"));
+  toolPen?.addEventListener("click", () => setTool("pen"));
   toolMemo?.addEventListener("click", () => setTool("memo"));
-  toolSelect?.addEventListener("click", () => setTool("select"));
-  deleteAnnotationBtn?.addEventListener("click", deleteSelectedAnnotation);
+  deleteAllBtn?.addEventListener("click", deleteAllAnnotations);
   memoSaveBtn?.addEventListener("click", saveMemoFromPanel);
   memoCancelBtn?.addEventListener("click", closeMemoPanel);
 
   annotationLayer.addEventListener("mousedown", onLayerPointerDown);
   window.addEventListener("mousemove", onLayerPointerMove);
   window.addEventListener("mouseup", onLayerPointerUp);
+
+  if (typeof ResizeObserver !== "undefined") {
+    const overlayResizeObserver = new ResizeObserver(() => {
+      if (!pdfDoc) return;
+      syncAnnotationOverlay();
+      if (!penState) renderAnnotations();
+    });
+    overlayResizeObserver.observe(pdfCanvas);
+  } else {
+    window.addEventListener("resize", () => {
+      if (!pdfDoc) return;
+      syncAnnotationOverlay();
+      if (!penState) renderAnnotations();
+    });
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (isTypingTarget(document.activeElement)) return;
+    if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      goToPage(-1);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      goToPage(1);
+    }
+  });
 
   try {
     if (localId) {
@@ -506,32 +567,36 @@
   async function renderPage() {
     if (!pdfDoc) return;
     currentPage = Math.min(Math.max(1, currentPage), totalPages);
-    selectAnnotation(null);
     closeMemoPanel();
-    pageTextItems = await loadPageTextItems(currentPage);
+    clearLivePen();
+    penState = null;
     const page = await pdfDoc.getPage(currentPage);
-    const viewport = page.getViewport({ scale: 1.35 });
+    const baseScale = 1.35;
+    const baseViewport = page.getViewport({ scale: baseScale });
+    const maxWidth = Math.max(280, pdfScroll.clientWidth - 32);
+    const fitScale = Math.min(1, maxWidth / baseViewport.width);
+    const displayWidth = baseViewport.width * fitScale;
+    const displayHeight = baseViewport.height * fitScale;
+    const viewport = page.getViewport({ scale: baseScale * fitScale });
+    const dpr = window.devicePixelRatio || 1;
     const ctx = pdfCanvas.getContext("2d");
-    pdfCanvas.height = viewport.height;
-    pdfCanvas.width = viewport.width;
+    pdfCanvas.width = Math.floor(displayWidth * dpr);
+    pdfCanvas.height = Math.floor(displayHeight * dpr);
+    pdfCanvas.style.width = `${displayWidth}px`;
+    pdfCanvas.style.height = `${displayHeight}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     await page.render({ canvasContext: ctx, viewport }).promise;
     pageLabel.textContent = `${currentPage} / ${totalPages}`;
     persistState();
     pdfScroll.scrollTop = 0;
-    requestAnimationFrame(() => renderAnnotations());
+    requestAnimationFrame(() => {
+      syncAnnotationOverlay();
+      renderAnnotations();
+    });
   }
 
-  prevPage.addEventListener("click", async () => {
-    if (currentPage <= 1) return;
-    currentPage -= 1;
-    await renderPage().catch((e) => showErr(e));
-  });
-
-  nextPage.addEventListener("click", async () => {
-    if (currentPage >= totalPages) return;
-    currentPage += 1;
-    await renderPage().catch((e) => showErr(e));
-  });
+  prevPage.addEventListener("click", () => goToPage(-1));
+  nextPage.addEventListener("click", () => goToPage(1));
 
   async function openPdfDocument() {
     const opts = { url: pdfSrc, withCredentials: false, disableRange: true, disableStream: true };
@@ -573,7 +638,7 @@
         }
       }
       currentPage = Math.min(Math.max(1, currentPage), totalPages);
-      setTool("highlight");
+      setTool("pen");
       await renderPage();
     })
     .catch((err) => showErr(err));

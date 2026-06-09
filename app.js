@@ -1,7 +1,15 @@
 const STORAGE_KEY = "keepPointDataV2";
 const AUTH_KEY = "keepPointAuthV1";
+const USERS_KEY = "keepPointUsersV1";
 const CLOUD_KEY_PREFIX = "keepPointCloudV1_";
 const ALL_CATEGORY = "all";
+const NAVER_OAUTH_STATE_KEY = "keepPoint_naver_oauth_state";
+const AUTH_CONFIG = window.KEEPPOINT_AUTH_CONFIG || { googleClientId: "", naverClientId: "" };
+const AUTH_PROVIDER_LABELS = {
+  email: "이메일",
+  google: "Google",
+  naver: "네이버"
+};
 
 function getPdfReadingStorageKey(linkUrl) {
   return `keepPoint_pdf_reading_${encodeURIComponent(linkUrl || "")}`;
@@ -93,28 +101,162 @@ function cloudStorageKey(userId) {
   return `${CLOUD_KEY_PREFIX}${encodeURIComponent(userId || "")}`;
 }
 
+function loadUsers() {
+  try {
+    const raw = localStorage.getItem(USERS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveUsers(users) {
+  localStorage.setItem(USERS_KEY, JSON.stringify(users));
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function userIdFromEmail(email) {
+  return `email_${normalizeEmail(email).replace(/[^a-z0-9@._-]/gi, "_")}`;
+}
+
+function userIdFromSocial(provider, socialId) {
+  return `${provider}_${String(socialId).replace(/[^a-z0-9._-]/gi, "_")}`;
+}
+
+async function hashPassword(password, salt) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode(salt), iterations: 120000, hash: "SHA-256" },
+    keyMaterial,
+    256
+  );
+  return Array.from(new Uint8Array(bits))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function verifyPassword(password, salt, expectedHash) {
+  const actual = await hashPassword(password, salt);
+  return actual === expectedHash;
+}
+
+function findUserByEmail(email) {
+  const normalized = normalizeEmail(email);
+  return loadUsers().find((u) => normalizeEmail(u.email) === normalized);
+}
+
+function findUserById(userId) {
+  return loadUsers().find((u) => u.userId === userId);
+}
+
+async function registerEmailUser({ name, email, password }) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || !password) throw new Error("이메일과 비밀번호를 입력해 주세요.");
+  if (password.length < 6) throw new Error("비밀번호는 6자 이상이어야 합니다.");
+  if (findUserByEmail(normalizedEmail)) throw new Error("이미 가입된 이메일입니다.");
+
+  const salt = crypto.randomUUID();
+  const passwordHash = await hashPassword(password, salt);
+  const user = {
+    userId: userIdFromEmail(normalizedEmail),
+    email: normalizedEmail,
+    name: String(name || "").trim() || normalizedEmail.split("@")[0] || "사용자",
+    provider: "email",
+    salt,
+    passwordHash,
+    createdAt: new Date().toISOString()
+  };
+  const users = loadUsers();
+  users.push(user);
+  saveUsers(users);
+  return user;
+}
+
+async function loginEmailUser({ email, password }) {
+  const normalizedEmail = normalizeEmail(email);
+  const user = findUserByEmail(normalizedEmail);
+  if (!user || user.provider !== "email") throw new Error("가입되지 않은 이메일이거나 소셜 로그인 계정입니다.");
+  const ok = await verifyPassword(password, user.salt, user.passwordHash);
+  if (!ok) throw new Error("비밀번호가 올바르지 않습니다.");
+  return user;
+}
+
+function upsertSocialUser({ provider, email, name, socialId }) {
+  const userId = userIdFromSocial(provider, socialId);
+  const users = loadUsers();
+  let user = users.find((u) => u.userId === userId);
+  const normalizedEmail = normalizeEmail(email) || `${userId}@${provider}.user`;
+  if (!user) {
+    user = {
+      userId,
+      email: normalizedEmail,
+      name: String(name || "").trim() || `${AUTH_PROVIDER_LABELS[provider] || provider} 사용자`,
+      provider,
+      socialId: String(socialId),
+      createdAt: new Date().toISOString()
+    };
+    users.push(user);
+  } else {
+    user.email = normalizedEmail;
+    user.name = String(name || "").trim() || user.name;
+    user.socialId = String(socialId);
+  }
+  saveUsers(users);
+  return user;
+}
+
 function loadAuth() {
   try {
     const raw = localStorage.getItem(AUTH_KEY);
-    if (!raw) return { isLoggedIn: false, userId: "guest", name: "게스트", email: "" };
+    if (!raw) {
+      return { isLoggedIn: false, userId: "guest", name: "게스트", email: "", provider: "" };
+    }
     const parsed = JSON.parse(raw);
     if (parsed?.isLoggedIn && parsed?.userId) {
       return {
         isLoggedIn: true,
         userId: String(parsed.userId),
         name: String(parsed.name || "사용자"),
-        email: String(parsed.email || "")
+        email: String(parsed.email || ""),
+        provider: String(parsed.provider || "email")
       };
     }
   } catch {
     /* ignore */
   }
-  return { isLoggedIn: false, userId: "guest", name: "게스트", email: "" };
+  return { isLoggedIn: false, userId: "guest", name: "게스트", email: "", provider: "" };
 }
 
 function saveAuth() {
   localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
 }
+
+function parseJwtPayload(token) {
+  const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+  const json = atob(base64);
+  return JSON.parse(json);
+}
+
+function captureNaverOAuthReturn() {
+  const hash = window.location.hash || "";
+  if (!hash.includes("access_token=")) return null;
+  const params = new URLSearchParams(hash.slice(1));
+  const token = params.get("access_token");
+  const state = params.get("state");
+  const expected = sessionStorage.getItem(NAVER_OAUTH_STATE_KEY);
+  if (!token || !state || state !== expected) return null;
+  sessionStorage.removeItem(NAVER_OAUTH_STATE_KEY);
+  const cleanUrl = `${window.location.pathname}${window.location.search}`;
+  history.replaceState(null, "", cleanUrl);
+  return token;
+}
+
+const bootOAuthToken = captureNaverOAuthReturn();
 
 function getSavedItemCount() {
   return (Array.isArray(state.links) ? state.links.length : 0) + (Array.isArray(state.localPdfs) ? state.localPdfs.length : 0);
@@ -252,6 +394,7 @@ const categoryTabs = document.getElementById("categoryTabs");
 const recentList = document.getElementById("recentList");
 const linkList = document.getElementById("linkList");
 const localPdfList = document.getElementById("localPdfList");
+const localPdfCategoryTitle = document.getElementById("localPdfCategoryTitle");
 const detailView = document.getElementById("detailView");
 const currentCategoryTitle = document.getElementById("currentCategoryTitle");
 const profileName = document.getElementById("profileName");
@@ -266,13 +409,28 @@ const categoryForm = document.getElementById("categoryForm");
 const categoryNameInput = document.getElementById("categoryNameInput");
 const loginModal = document.getElementById("loginModal");
 const loginForm = document.getElementById("loginForm");
-const loginNameInput = document.getElementById("loginNameInput");
+const loginHelperText = document.getElementById("loginHelperText");
+const authLoginPanel = document.getElementById("authLoginPanel");
+const authSignupPanel = document.getElementById("authSignupPanel");
 const loginEmailInput = document.getElementById("loginEmailInput");
+const loginPasswordInput = document.getElementById("loginPasswordInput");
+const signupNameInput = document.getElementById("signupNameInput");
+const signupEmailInput = document.getElementById("signupEmailInput");
+const signupPasswordInput = document.getElementById("signupPasswordInput");
+const signupPasswordConfirmInput = document.getElementById("signupPasswordConfirmInput");
+const authPrimaryBtn = document.getElementById("authPrimaryBtn");
+const authErrorText = document.getElementById("authErrorText");
+const googleLoginBtn = document.getElementById("googleLoginBtn");
+const naverLoginBtn = document.getElementById("naverLoginBtn");
+const oauthSetupHelpBtn = document.getElementById("oauthSetupHelpBtn");
+const oauthSetupModal = document.getElementById("oauthSetupModal");
 const profileModal = document.getElementById("profileModal");
 const profileStatusText = document.getElementById("profileStatusText");
 const profileNameInput = document.getElementById("profileNameInput");
 const profileEmailInput = document.getElementById("profileEmailInput");
+const profileProviderInput = document.getElementById("profileProviderInput");
 const deleteAccountBtn = document.getElementById("deleteAccountBtn");
+let authModalMode = "login";
 const guestNotice = document.getElementById("guestNotice");
 const syncAcrossDevicesBtn = document.getElementById("syncAcrossDevicesBtn");
 const connectExtensionBtn = document.getElementById("connectExtensionBtn");
@@ -288,10 +446,26 @@ if (addCategoryBtn) {
   });
 }
 if (deleteCategoryBtn) deleteCategoryBtn.addEventListener("click", deleteSelectedCategory);
-if (categoryForm) categoryForm.addEventListener("submit", onCreateCategory);
+if (categoryForm) categoryForm.addEventListener("submit", onCategoryFormSubmit);
 if (openLoginBtn) openLoginBtn.addEventListener("click", () => openLoginModal("manual"));
 if (openProfileBtn) openProfileBtn.addEventListener("click", openProfileModal);
-if (loginForm) loginForm.addEventListener("submit", onLoginSubmit);
+if (loginForm) loginForm.addEventListener("submit", onAuthFormSubmit);
+if (googleLoginBtn) googleLoginBtn.addEventListener("click", onGoogleLoginClick);
+if (naverLoginBtn) naverLoginBtn.addEventListener("click", onNaverLoginClick);
+if (oauthSetupHelpBtn) oauthSetupHelpBtn.addEventListener("click", openOAuthSetupGuide);
+for (const copyBtn of document.querySelectorAll(".oauth-copy-btn")) {
+  copyBtn.addEventListener("click", () => {
+    const target = document.getElementById(copyBtn.dataset.copyTarget || "");
+    if (!target) return;
+    navigator.clipboard?.writeText(target.textContent || "").then(
+      () => alert("복사했습니다."),
+      () => alert(target.textContent || "")
+    );
+  });
+}
+for (const tabBtn of document.querySelectorAll("[data-auth-tab]")) {
+  tabBtn.addEventListener("click", () => setAuthModalMode(tabBtn.dataset.authTab));
+}
 if (deleteAccountBtn) deleteAccountBtn.addEventListener("click", onDeleteAccount);
 if (syncAcrossDevicesBtn) syncAcrossDevicesBtn.addEventListener("click", onSyncAcrossDevicesClick);
 if (connectExtensionBtn) connectExtensionBtn.addEventListener("click", onConnectExtensionClick);
@@ -329,6 +503,9 @@ function openProfileModal() {
   if (profileStatusText) profileStatusText.textContent = "로그인된 계정 정보";
   if (profileNameInput) profileNameInput.value = auth.name || "";
   if (profileEmailInput) profileEmailInput.value = auth.email || "";
+  if (profileProviderInput) {
+    profileProviderInput.value = AUTH_PROVIDER_LABELS[auth.provider] || auth.provider || "이메일";
+  }
   profileModal.showModal();
 }
 
@@ -340,11 +517,14 @@ function onDeleteAccount() {
   const cloudKey = cloudStorageKey(auth.userId);
   localStorage.removeItem(cloudKey);
   localStorage.removeItem(AUTH_KEY);
+  const users = loadUsers().filter((u) => u.userId !== auth.userId);
+  saveUsers(users);
 
   auth.isLoggedIn = false;
   auth.userId = "guest";
   auth.name = "게스트";
   auth.email = "";
+  auth.provider = "";
 
   state.profile.name = "게스트";
   state.ui.loginPromptedForLimit = false;
@@ -367,6 +547,38 @@ function onCreateShareLinkClick() {
   shareLink(link.id);
 }
 
+function setAuthError(message) {
+  if (!authErrorText) return;
+  if (!message) {
+    authErrorText.textContent = "";
+    authErrorText.classList.add("hidden");
+    return;
+  }
+  authErrorText.textContent = message;
+  authErrorText.classList.remove("hidden");
+}
+
+function setAuthModalMode(mode) {
+  authModalMode = mode === "signup" ? "signup" : "login";
+  for (const tabBtn of document.querySelectorAll("[data-auth-tab]")) {
+    tabBtn.classList.toggle("active", tabBtn.dataset.authTab === authModalMode);
+  }
+  authLoginPanel?.classList.toggle("hidden", authModalMode !== "login");
+  authSignupPanel?.classList.toggle("hidden", authModalMode !== "signup");
+  if (authPrimaryBtn) authPrimaryBtn.textContent = authModalMode === "signup" ? "회원가입" : "로그인";
+  setAuthError("");
+}
+
+function resetAuthFormFields() {
+  if (loginEmailInput) loginEmailInput.value = auth.email || "";
+  if (loginPasswordInput) loginPasswordInput.value = "";
+  if (signupNameInput) signupNameInput.value = "";
+  if (signupEmailInput) signupEmailInput.value = "";
+  if (signupPasswordInput) signupPasswordInput.value = "";
+  if (signupPasswordConfirmInput) signupPasswordConfirmInput.value = "";
+  setAuthError("");
+}
+
 function openLoginModal(reason) {
   if (!loginModal) return;
   const reasonMap = {
@@ -375,13 +587,12 @@ function openLoginModal(reason) {
     extension: "Chrome Extension 연동은 로그인 후 사용할 수 있어요.",
     "ai-summary": "AI 요약 저장은 로그인 후 사용할 수 있어요.",
     "share-link": "공유 링크 만들기는 로그인 후 사용할 수 있어요.",
-    manual: "읽던 위치를 계속 보관하려면 로그인하세요."
+    manual: "이메일로 로그인하거나 회원가입·간편 로그인을 이용하세요."
   };
   const msg = reasonMap[reason] || reasonMap.manual;
-  const helper = loginForm?.querySelector(".meta");
-  if (helper) helper.textContent = msg;
-  if (loginNameInput) loginNameInput.value = auth.name === "게스트" ? "" : auth.name;
-  if (loginEmailInput) loginEmailInput.value = auth.email || "";
+  if (loginHelperText) loginHelperText.textContent = msg;
+  setAuthModalMode("login");
+  resetAuthFormFields();
   loginModal.showModal();
 }
 
@@ -413,23 +624,163 @@ async function migrateGuestDataToUser(userId) {
   }
 }
 
-async function onLoginSubmit(event) {
-  event.preventDefault();
-  const email = String(loginEmailInput?.value || "").trim().toLowerCase();
-  if (!email) return;
-  const name = String(loginNameInput?.value || "").trim() || email.split("@")[0] || "사용자";
-  const userId = email.replace(/[^a-z0-9@._-]/gi, "_");
-
+async function completeLoginFromUser(user) {
   auth.isLoggedIn = true;
-  auth.userId = userId;
-  auth.name = name;
-  auth.email = email;
+  auth.userId = user.userId;
+  auth.name = user.name;
+  auth.email = user.email;
+  auth.provider = user.provider || "email";
   saveAuth();
-
-  await migrateGuestDataToUser(userId);
-  state.profile.name = name;
+  await migrateGuestDataToUser(user.userId);
+  state.profile.name = user.name;
   saveAndRender();
   if (loginModal?.open) loginModal.close();
+}
+
+async function onAuthFormSubmit(event) {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  setAuthError("");
+  try {
+    if (authModalMode === "signup") {
+      const name = String(signupNameInput?.value || "").trim();
+      const email = String(signupEmailInput?.value || "").trim();
+      const password = String(signupPasswordInput?.value || "");
+      const confirm = String(signupPasswordConfirmInput?.value || "");
+      if (!email || !password) {
+        setAuthError("이메일과 비밀번호를 입력해 주세요.");
+        return;
+      }
+      if (password !== confirm) {
+        setAuthError("비밀번호 확인이 일치하지 않습니다.");
+        return;
+      }
+      const user = await registerEmailUser({ name, email, password });
+      await completeLoginFromUser(user);
+      return;
+    }
+    const email = String(loginEmailInput?.value || "").trim();
+    const password = String(loginPasswordInput?.value || "");
+    if (!email || !password) {
+      setAuthError("이메일과 비밀번호를 입력해 주세요.");
+      return;
+    }
+    const user = await loginEmailUser({ email, password });
+    await completeLoginFromUser(user);
+  } catch (err) {
+    setAuthError(err?.message || "로그인에 실패했습니다.");
+  }
+}
+
+function getOAuthRedirectUri() {
+  return `${window.location.origin}${window.location.pathname}`;
+}
+
+function isOAuthSupportedOrigin() {
+  return window.location.protocol === "http:" || window.location.protocol === "https:";
+}
+
+function openOAuthSetupGuide() {
+  if (!oauthSetupModal) return;
+  const origin = isOAuthSupportedOrigin() ? window.location.origin : "http://localhost:3000";
+  const callback = isOAuthSupportedOrigin()
+    ? getOAuthRedirectUri()
+    : "http://localhost:3000/index.html";
+  const example = `${origin}/index.html`;
+  const originEl = document.getElementById("oauthGoogleOrigin");
+  const callbackEl = document.getElementById("oauthNaverCallback");
+  const exampleEl = document.getElementById("oauthExampleUrl");
+  if (originEl) originEl.textContent = origin;
+  if (callbackEl) callbackEl.textContent = callback;
+  if (exampleEl) exampleEl.textContent = example;
+  oauthSetupModal.showModal();
+}
+
+function onGoogleLoginClick() {
+  setAuthError("");
+  if (!isOAuthSupportedOrigin()) {
+    setAuthError("파일로 직접 열면 Google 로그인이 되지 않습니다. 로컬 서버로 실행해 주세요.");
+    openOAuthSetupGuide();
+    return;
+  }
+  const clientId = String(AUTH_CONFIG.googleClientId || "").trim();
+  if (!clientId) {
+    setAuthError("auth-config.js에 googleClientId를 입력해 주세요. (설정 방법 버튼 참고)");
+    openOAuthSetupGuide();
+    return;
+  }
+  if (!window.google?.accounts?.oauth2) {
+    setAuthError("Google 로그인 스크립트를 불러오는 중입니다. 잠시 후 다시 시도해 주세요.");
+    return;
+  }
+  const client = window.google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: "openid email profile",
+    callback: async (tokenResponse) => {
+      if (tokenResponse.error) {
+        setAuthError("Google 로그인이 취소되었거나 실패했습니다.");
+        return;
+      }
+      try {
+        const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+          headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
+        });
+        if (!res.ok) throw new Error("Google 프로필을 가져오지 못했습니다.");
+        const profile = await res.json();
+        const user = upsertSocialUser({
+          provider: "google",
+          email: profile.email,
+          name: profile.name,
+          socialId: profile.sub
+        });
+        await completeLoginFromUser(user);
+      } catch (err) {
+        setAuthError(err?.message || "Google 로그인에 실패했습니다.");
+      }
+    }
+  });
+  client.requestAccessToken();
+}
+
+function onNaverLoginClick() {
+  setAuthError("");
+  if (!isOAuthSupportedOrigin()) {
+    setAuthError("파일로 직접 열면 네이버 로그인이 되지 않습니다. 로컬 서버로 실행해 주세요.");
+    openOAuthSetupGuide();
+    return;
+  }
+  const clientId = String(AUTH_CONFIG.naverClientId || "").trim();
+  if (!clientId) {
+    setAuthError("auth-config.js에 naverClientId를 입력해 주세요. (설정 방법 버튼 참고)");
+    openOAuthSetupGuide();
+    return;
+  }
+  const state = crypto.randomUUID();
+  sessionStorage.setItem(NAVER_OAUTH_STATE_KEY, state);
+  const redirectUri = getOAuthRedirectUri();
+  const url = new URL("https://nid.naver.com/oauth2.0/authorize");
+  url.searchParams.set("response_type", "token");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("state", state);
+  window.location.href = url.toString();
+}
+
+async function completeNaverLogin(accessToken) {
+  const res = await fetch("https://openapi.naver.com/v1/nid/me", {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!res.ok) throw new Error("네이버 프로필을 가져오지 못했습니다.");
+  const data = await res.json();
+  if (data.resultcode !== "00") throw new Error("네이버 로그인에 실패했습니다.");
+  const profile = data.response || {};
+  const user = upsertSocialUser({
+    provider: "naver",
+    email: profile.email || `naver_${profile.id}@naver.user`,
+    name: profile.name || profile.nickname || "네이버 사용자",
+    socialId: profile.id
+  });
+  await completeLoginFromUser(user);
 }
 
 function maybePromptLoginByLimit(previousCount) {
@@ -443,10 +794,14 @@ function maybePromptLoginByLimit(previousCount) {
   openLoginModal("limit");
 }
 
-function onCreateCategory(event) {
+function onCategoryFormSubmit(event) {
+  if (event.submitter?.value === "cancel") return;
   event.preventDefault();
   const name = categoryNameInput.value.trim();
-  if (!name) return;
+  if (!name) {
+    alert("카테고리 이름을 입력해 주세요.");
+    return;
+  }
   const id = createId("c");
   state.categories.push({ id, name });
   state.ui.selectedCategoryId = id;
@@ -555,15 +910,30 @@ async function onPdfFileSelected() {
     alert("PDF를 저장하지 못했습니다. IndexedDB를 사용할 수 있는지 확인해 주세요.");
     return;
   }
+  const targetCategoryId = state.ui.selectedCategoryId === ALL_CATEGORY
+    ? state.categories[0]?.id
+    : state.ui.selectedCategoryId;
+  if (!targetCategoryId) {
+    alert("먼저 카테고리를 생성해 주세요.");
+    try {
+      await idbDeleteLocalPdfRecord(id);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
   if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
   state.localPdfs.unshift({
     id,
+    categoryId: targetCategoryId,
     title: baseTitle,
     fileName: file.name,
     size: file.size,
     lastModified: file.lastModified,
     addedAt: createdAt
   });
+  state.ui.selectedCategoryId = targetCategoryId;
   saveAndRender();
   maybePromptLoginByLimit(previousCount);
 }
@@ -629,11 +999,19 @@ function renderRecent() {
 function renderLocalPdfList() {
   if (!localPdfList) return;
   localPdfList.innerHTML = "";
-  const list = Array.isArray(state.localPdfs) ? state.localPdfs : [];
+  const selectedCategory = state.categories.find((c) => c.id === state.ui.selectedCategoryId);
+  if (localPdfCategoryTitle) {
+    localPdfCategoryTitle.textContent = selectedCategory
+      ? `${selectedCategory.name} · 내 PC PDF`
+      : "전체 · 내 PC PDF";
+  }
+  const list = getVisibleLocalPdfs();
   if (!list.length) {
     const empty = document.createElement("li");
     empty.className = "local-pdf-empty";
-    empty.textContent = "저장된 내 PC PDF가 없습니다. 위의 「내 PDF 열기」로 파일을 추가해 주세요.";
+    empty.textContent = selectedCategory
+      ? `「${selectedCategory.name}」 카테고리에 저장된 PDF가 없습니다. 「내 PDF 열기」로 이 카테고리에 추가해 주세요.`
+      : "저장된 내 PC PDF가 없습니다. 카테고리를 선택한 뒤 「내 PDF 열기」로 파일을 추가해 주세요.";
     localPdfList.appendChild(empty);
     return;
   }
@@ -985,10 +1363,17 @@ function deleteSelectedCategory() {
   }
   const category = state.categories.find((item) => item.id === state.ui.selectedCategoryId);
   if (!category) return;
-  if (!confirm(`'${category.name}' 카테고리를 삭제할까요?\n해당 링크도 함께 삭제됩니다.`)) return;
+  const pdfsInCategory = (state.localPdfs || []).filter((item) => item.categoryId === category.id);
+  const pdfNote = pdfsInCategory.length ? `\n해당 카테고리의 내 PC PDF ${pdfsInCategory.length}개도 함께 삭제됩니다.` : "";
+  if (!confirm(`'${category.name}' 카테고리를 삭제할까요?\n해당 링크도 함께 삭제됩니다.${pdfNote}`)) return;
 
   state.categories = state.categories.filter((item) => item.id !== category.id);
   state.links = state.links.filter((item) => item.categoryId !== category.id);
+  for (const pdf of pdfsInCategory) {
+    idbDeleteLocalPdfRecord(pdf.id).catch(console.error);
+    localStorage.removeItem(getLocalPdfPageStorageKey(pdf.id));
+  }
+  state.localPdfs = (state.localPdfs || []).filter((item) => item.categoryId !== category.id);
   state.ui.selectedCategoryId = ALL_CATEGORY;
   state.ui.selectedLinkId = getVisibleLinks()[0]?.id || null;
   saveAndRender();
@@ -1044,9 +1429,21 @@ function getVisibleLinks() {
   return state.links.filter((link) => link.categoryId === state.ui.selectedCategoryId);
 }
 
+function getVisibleLocalPdfs() {
+  const list = Array.isArray(state.localPdfs) ? state.localPdfs : [];
+  if (state.ui.selectedCategoryId === ALL_CATEGORY) return list;
+  return list.filter((item) => item.categoryId === state.ui.selectedCategoryId);
+}
+
 function normalizeState() {
   if (!state.ui || typeof state.ui !== "object") state.ui = {};
   if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
+  const fallbackCategoryId = state.categories?.[0]?.id || null;
+  for (const pdf of state.localPdfs) {
+    if (!pdf.categoryId && fallbackCategoryId) {
+      pdf.categoryId = fallbackCategoryId;
+    }
+  }
   if (!state.profile || typeof state.profile !== "object") state.profile = { name: "게스트" };
   if (!state.ui.loginPromptedForLimit) state.ui.loginPromptedForLimit = false;
   for (const link of state.links || []) {
@@ -1336,4 +1733,15 @@ function escapeAttr(text) {
   return escapeHtml(text);
 }
 
-render();
+async function bootApp() {
+  if (bootOAuthToken) {
+    try {
+      await completeNaverLogin(bootOAuthToken);
+    } catch (err) {
+      alert(err?.message || "네이버 로그인에 실패했습니다.");
+    }
+  }
+  render();
+}
+
+bootApp();

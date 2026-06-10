@@ -3,10 +3,13 @@
   const AUTH_KEY = "keepPointAuthV1";
   const CLOUD_KEY_PREFIX = "keepPointCloudV1_";
 
+  const boot = window.__KEEPPOINT_READER__;
   const params = new URLSearchParams(window.location.search);
   const pathMatch = window.location.pathname.match(/\/reader\/([^/?#]+)/);
-  const linkId = String(params.get("id") || (pathMatch ? pathMatch[1] : "") || "").trim();
-  const restart = params.get("mode") === "restart";
+  const linkId = String(
+    boot?.id || params.get("id") || (pathMatch ? decodeURIComponent(pathMatch[1]) : "") || ""
+  ).trim();
+  const restart = boot?.restart === true || params.get("mode") === "restart";
 
   const backBtn = document.getElementById("backBtn");
   const readerTitle = document.getElementById("readerTitle");

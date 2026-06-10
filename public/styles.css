@@ -179,6 +179,9 @@ textarea {
 }
 .item.active { border-color: #2563eb; background: #eff6ff; }
 .item .meta { margin-top: 4px; font-size: 12px; color: #5f6b7d; }
+.item .content-status.ready { color: #15803d; font-weight: 600; }
+.item .content-status.failed { color: #b45309; font-weight: 600; }
+.reader-detail-card .resume-actions { margin-top: 10px; }
 .item .preview { margin-top: 6px; font-size: 12px; color: #5f6b7d; display: none; }
 .item:hover .preview { display: block; }
 

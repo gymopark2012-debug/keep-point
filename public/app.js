@@ -337,6 +337,80 @@ function saveWebMemo(link, memoDraft) {
   saveAndRender();
 }
 
+function getOriginalUrl(link) {
+  return link?.originalUrl || link?.url || "";
+}
+
+function getReaderState(link) {
+  const rs = link?.readerState;
+  if (!rs || typeof rs !== "object") {
+    return { scrollRatio: 0, lastParagraphId: null, updatedAt: null };
+  }
+  return {
+    scrollRatio: Math.max(0, Math.min(1, Number(rs.scrollRatio) || 0)),
+    lastParagraphId: rs.lastParagraphId || null,
+    updatedAt: rs.updatedAt || null
+  };
+}
+
+function normalizeReaderLink(link) {
+  if (!link || typeof link !== "object") return;
+  if (!link.originalUrl) link.originalUrl = link.url || "";
+  if (typeof link.content !== "string") link.content = "";
+  if (!link.contentStatus) {
+    link.contentStatus = link.content.trim() ? "ready" : "failed";
+  }
+  link.readerState = getReaderState(link);
+}
+
+function getContentStatusLabel(status) {
+  if (status === "ready") return "본문 저장됨";
+  if (status === "pending") return "본문 가져오는 중...";
+  return "본문 추출 실패, 직접 붙여넣기 필요";
+}
+
+function readerPageUrl(linkId, restart) {
+  const qs = restart ? "?mode=restart" : "";
+  return `/reader/${encodeURIComponent(linkId)}${qs}`;
+}
+
+function openReader(linkId, restart) {
+  window.location.href = readerPageUrl(linkId, restart);
+}
+
+function openOriginalUrl(link) {
+  const url = normalizeUrl(getOriginalUrl(link));
+  if (!url) {
+    alert("원본 URL이 없습니다.");
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function extractAndApplyToLink(link) {
+  const url = getOriginalUrl(link);
+  if (!url || isPdfUrl(url)) return;
+  link.contentStatus = "pending";
+  saveAndRender();
+  const result = await window.KeepPointContentExtract.extractFromUrl(url);
+  if (result.title) link.title = result.title;
+  link.content = result.content || "";
+  link.contentStatus = result.status === "ready" ? "ready" : "failed";
+  saveAndRender();
+}
+
+function saveManualReaderContent(link, rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    alert("붙여넣을 본문을 입력해 주세요.");
+    return;
+  }
+  link.content = window.KeepPointContentExtract.plainTextToReaderHtml(text);
+  link.contentStatus = "ready";
+  link.readerState = { scrollRatio: 0, lastParagraphId: null, updatedAt: null };
+  saveAndRender();
+}
+
 const defaultData = {
   profile: { name: "게스트" },
   categories: [
@@ -830,7 +904,6 @@ async function addQuickLinkFromInput() {
     return;
   }
 
-  const title = await autoTitleFromUrl(parsed);
   const targetCategoryId = state.ui.selectedCategoryId === ALL_CATEGORY
     ? state.categories[0]?.id
     : state.ui.selectedCategoryId;
@@ -841,11 +914,40 @@ async function addQuickLinkFromInput() {
   }
 
   const previousCount = getSavedItemCount();
+  const isPdf = isPdfUrl(parsed);
+  let title = await autoTitleFromUrl(parsed);
+  let content = "";
+  let contentStatus = "failed";
+
+  if (!isPdf) {
+    if (quickAddBtn) {
+      quickAddBtn.disabled = true;
+      quickAddBtn.textContent = "본문 가져오는 중...";
+    }
+    try {
+      const extracted = await window.KeepPointContentExtract.extractFromUrl(parsed);
+      if (extracted.title) title = extracted.title;
+      content = extracted.content || "";
+      contentStatus = extracted.status === "ready" ? "ready" : "failed";
+    } catch {
+      contentStatus = "failed";
+    } finally {
+      if (quickAddBtn) {
+        quickAddBtn.disabled = false;
+        quickAddBtn.textContent = "추가";
+      }
+    }
+  }
+
   const link = {
     id: createId("l"),
     categoryId: targetCategoryId,
     title,
     url: parsed,
+    originalUrl: parsed,
+    content,
+    contentStatus: isPdf ? null : contentStatus,
+    readerState: { scrollRatio: 0, lastParagraphId: null, updatedAt: null },
     tags: [],
     description: "",
     webMemo: { whySaved: "", keyPoints: "", myThoughts: "", nextPoint: "", tagsText: "", readHint: "", updatedAt: null },
@@ -857,16 +959,16 @@ async function addQuickLinkFromInput() {
   state.ui.selectedCategoryId = targetCategoryId;
   selectLink(link.id);
   quickAddInput.value = "";
+  if (!isPdf && contentStatus === "failed") {
+    alert("본문 추출 실패, 직접 붙여넣기 필요\n상세 패널에서 본문을 붙여넣을 수 있습니다.");
+  }
   maybePromptLoginByLimit(previousCount);
 }
 
 function openLocalPdfViewer(id) {
-  const href = window.location.href.split("#")[0];
-  const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
-  const baseDir = slash >= 0 ? href.slice(0, slash + 1) : `${href}/`;
   const qs = new URLSearchParams();
   qs.set("localId", id);
-  window.location.href = `${baseDir}pdf-viewer.html?${qs.toString()}`;
+  window.location.href = `/pdf-viewer.html?${qs.toString()}`;
 }
 
 async function deleteLocalPdf(id) {
@@ -1060,32 +1162,51 @@ function renderLinks() {
   currentCategoryTitle.textContent = selectedCategory ? `${selectedCategory.name} 링크` : "전체 링크";
 
   for (const link of getVisibleLinks()) {
+    const isPdf = isPdfUrl(link.url);
     const memo = getWebMemo(link);
-    const trailLine = memo.readHint || "지난번 위치 기록 없음";
-    const savedLine = memo.updatedAt ? relativeTime(memo.updatedAt) : "기록 없음";
+    const readerState = getReaderState(link);
+    const progressLine =
+      readerState.scrollRatio > 0 ? `${Math.round(readerState.scrollRatio * 100)}%` : "0%";
     const li = document.createElement("li");
     li.className = "item";
     if (link.id === state.ui.selectedLinkId) li.classList.add("active");
 
-    li.innerHTML = `
-      <div>${escapeHtml(link.title)}</div>
-      <div class="meta">URL: ${escapeHtml(shortText(link.url || "", 60))}</div>
-      <div class="meta">왜 저장했는지: ${escapeHtml(shortText(memo.whySaved || "미작성", 50))}</div>
-      <div class="meta">핵심 내용: ${escapeHtml(shortText(memo.keyPoints || "미작성", 50))}</div>
-      <div class="meta">지난번 여기까지: ${escapeHtml(shortText(trailLine, 45))}</div>
-      <div class="meta">마지막 저장: ${savedLine}</div>
-      <div class="hover-actions">
-        <button class="btn" data-action="read">읽기</button>
-        <button class="btn ghost" data-action="share">공유</button>
-        <button class="btn danger" data-action="delete">삭제</button>
-      </div>
-    `;
+    if (isPdf) {
+      li.innerHTML = `
+        <div>${escapeHtml(link.title)}</div>
+        <div class="meta">PDF · ${escapeHtml(shortText(getOriginalUrl(link), 60))}</div>
+        <div class="hover-actions">
+          <button class="btn" data-action="continue">이어보기</button>
+          <button class="btn ghost" data-action="original">원본 보기</button>
+          <button class="btn ghost" data-action="share">공유</button>
+          <button class="btn danger" data-action="delete">삭제</button>
+        </div>
+      `;
+    } else {
+      li.innerHTML = `
+        <div>${escapeHtml(link.title)}</div>
+        <div class="meta">원본: ${escapeHtml(shortText(getOriginalUrl(link), 55))}</div>
+        <div class="meta content-status ${link.contentStatus === "ready" ? "ready" : "failed"}">${escapeHtml(getContentStatusLabel(link.contentStatus))}</div>
+        <div class="meta">Reader 진행: ${progressLine}</div>
+        <div class="hover-actions">
+          <button class="btn" data-action="continue">이어보기</button>
+          <button class="btn ghost" data-action="original">원본 보기</button>
+          <button class="btn ghost" data-action="share">공유</button>
+          <button class="btn danger" data-action="delete">삭제</button>
+        </div>
+      `;
+    }
 
     li.addEventListener("click", (event) => {
       const action = event.target?.dataset?.action;
-      if (action === "read") {
+      if (action === "continue") {
         event.stopPropagation();
         openLinkForReading(link);
+        return;
+      }
+      if (action === "original") {
+        event.stopPropagation();
+        openOriginalUrl(link);
         return;
       }
       if (action === "share") {
@@ -1124,28 +1245,33 @@ function renderDetail() {
     pdfSnap && pdfSnap.pageNumber != null ? `마지막 페이지: ${pdfSnap.pageNumber}` : "저장된 페이지 없음";
 
   const webMemoHtml = `
+    <section class="resume-card reader-detail-card">
+      <strong>KeepPoint Reader</strong>
+      <p class="meta content-status ${link.contentStatus === "ready" ? "ready" : "failed"}">${escapeHtml(getContentStatusLabel(link.contentStatus))}</p>
+      <p class="meta">읽기 진행: ${Math.round(getReaderState(link).scrollRatio * 100)}%</p>
+      <div class="resume-actions">
+        <button type="button" class="btn" id="continueReaderBtn">이어보기</button>
+        <button type="button" class="btn ghost" id="openOriginalBtn">원본 보기</button>
+        <button type="button" class="btn ghost" id="retryExtractBtn">본문 다시 가져오기</button>
+      </div>
+      ${link.contentStatus !== "ready"
+        ? `<label class="trail-field">본문 직접 붙여넣기
+            <textarea id="manualContentInput" rows="10" placeholder="기사 본문을 복사해 붙여넣으세요."></textarea>
+          </label>
+          <button type="button" class="btn" id="saveManualContentBtn">본문 저장</button>`
+        : ""}
+    </section>
     <section class="resume-card">
-      <strong>메모 중심 링크 저장</strong>
-      <p class="meta" style="margin:6px 0 0;">일반 웹사이트는 자동 위치 추적/복원을 하지 않습니다. 원문은 새 탭으로 열고, 읽던 흔적은 직접 기록합니다.</p>
-      <label class="trail-field">어디까지 읽었는지 (수동 기록)
-        <input id="webReadHintInput" placeholder="예: 3번째 소제목까지 읽음" value="${escapeAttr(webMemo.readHint)}" />
-      </label>
+      <strong>메모</strong>
       <label class="trail-field">왜 저장했는지
         <textarea id="webWhySavedInput" rows="2">${escapeHtml(webMemo.whySaved)}</textarea>
       </label>
       <label class="trail-field">핵심 내용
         <textarea id="webKeyPointsInput" rows="3">${escapeHtml(webMemo.keyPoints)}</textarea>
       </label>
-      <label class="trail-field">내 생각
-        <textarea id="webThoughtsInput" rows="3">${escapeHtml(webMemo.myThoughts)}</textarea>
-      </label>
-      <label class="trail-field">다음에 볼 포인트
-        <textarea id="webNextPointInput" rows="2">${escapeHtml(webMemo.nextPoint)}</textarea>
-      </label>
       <label class="trail-field">태그 (쉼표로 구분)
-        <input id="webTagsInput" placeholder="예: 역사, 논문, 다시보기" value="${escapeAttr(webMemo.tagsText)}" />
+        <input id="webTagsInput" placeholder="예: 역사, 논문" value="${escapeAttr(webMemo.tagsText)}" />
       </label>
-      <div class="meta">마지막 저장 시간: ${webMemo.updatedAt ? relativeTime(webMemo.updatedAt) : "기록 없음"}</div>
     </section>
   `;
 
@@ -1155,7 +1281,7 @@ function renderDetail() {
       <button class="btn danger" id="deleteCurrentBtn">삭제</button>
     </div>
     <h3>${escapeHtml(link.title)}</h3>
-    <a href="${escapeAttr(link.url)}" target="_blank" rel="noreferrer">원문 링크</a>
+    <a href="${escapeAttr(getOriginalUrl(link))}" target="_blank" rel="noreferrer">원문 링크</a>
     ${isPdf
       ? `<div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
       : webMemoHtml}
@@ -1186,12 +1312,14 @@ function renderDetail() {
   const openPdfBtn = document.getElementById("openPdfBtn");
   const restartPdfBtn = document.getElementById("restartPdfBtn");
   const clearPdfBtn = document.getElementById("clearPdfBtn");
-  const webReadHintInput = document.getElementById("webReadHintInput");
   const webWhySavedInput = document.getElementById("webWhySavedInput");
   const webKeyPointsInput = document.getElementById("webKeyPointsInput");
-  const webThoughtsInput = document.getElementById("webThoughtsInput");
-  const webNextPointInput = document.getElementById("webNextPointInput");
   const webTagsInput = document.getElementById("webTagsInput");
+  const continueReaderBtn = document.getElementById("continueReaderBtn");
+  const openOriginalBtn = document.getElementById("openOriginalBtn");
+  const retryExtractBtn = document.getElementById("retryExtractBtn");
+  const manualContentInput = document.getElementById("manualContentInput");
+  const saveManualContentBtn = document.getElementById("saveManualContentBtn");
   let draftDesc = link.description || "";
   let draftTags = [...link.tags];
 
@@ -1297,11 +1425,11 @@ function renderDetail() {
     saveAndRender();
   };
   const readWebMemoDraft = () => ({
-    readHint: webReadHintInput?.value || "",
+    readHint: getWebMemo(link).readHint,
     whySaved: webWhySavedInput?.value || "",
     keyPoints: webKeyPointsInput?.value || "",
-    myThoughts: webThoughtsInput?.value || "",
-    nextPoint: webNextPointInput?.value || "",
+    myThoughts: getWebMemo(link).myThoughts,
+    nextPoint: getWebMemo(link).nextPoint,
     tagsText: webTagsInput?.value || ""
   });
   const onWebMemoInput = () => {
@@ -1313,11 +1441,20 @@ function renderDetail() {
   if (restartPdfBtn) restartPdfBtn.addEventListener("click", onRestartPdfClick);
   if (clearPdfBtn) clearPdfBtn.addEventListener("click", onClearPdfClick);
   if (!isPdf) {
-    if (webReadHintInput) webReadHintInput.addEventListener("blur", onWebMemoInput);
+    continueReaderBtn?.addEventListener("click", () => openReader(link.id, false));
+    openOriginalBtn?.addEventListener("click", () => openOriginalUrl(link));
+    retryExtractBtn?.addEventListener("click", async () => {
+      retryExtractBtn.disabled = true;
+      retryExtractBtn.textContent = "가져오는 중...";
+      await extractAndApplyToLink(link);
+      retryExtractBtn.disabled = false;
+      retryExtractBtn.textContent = "본문 다시 가져오기";
+    });
+    saveManualContentBtn?.addEventListener("click", () => {
+      saveManualReaderContent(link, manualContentInput?.value || "");
+    });
     if (webWhySavedInput) webWhySavedInput.addEventListener("blur", onWebMemoInput);
     if (webKeyPointsInput) webKeyPointsInput.addEventListener("blur", onWebMemoInput);
-    if (webThoughtsInput) webThoughtsInput.addEventListener("blur", onWebMemoInput);
-    if (webNextPointInput) webNextPointInput.addEventListener("blur", onWebMemoInput);
     if (webTagsInput) webTagsInput.addEventListener("blur", onWebMemoInput);
   }
 
@@ -1400,13 +1537,11 @@ function shareLink(linkId) {
   const payload = [
     `카테고리: ${category?.name || "없음"}`,
     `제목: ${link.title}`,
-    `링크: ${link.url}`,
+    `원본: ${getOriginalUrl(link)}`,
+    `Reader 진행: ${Math.round(getReaderState(link).scrollRatio * 100)}%`,
     `왜 저장했는지: ${memo.whySaved || "없음"}`,
     `핵심 내용: ${memo.keyPoints || "없음"}`,
-    `내 생각: ${memo.myThoughts || "없음"}`,
-    `다음에 볼 포인트: ${memo.nextPoint || "없음"}`,
-    `태그: ${memo.tagsText || "없음"}`,
-    `어디까지 읽었는지: ${memo.readHint || "없음"}`
+    `태그: ${memo.tagsText || "없음"}`
   ].join("\n");
   navigator.clipboard
     .writeText(payload)
@@ -1465,6 +1600,9 @@ function normalizeState() {
       link.readTrail = { locationNote: "", selectedText: "", progressPercent: 0, updatedAt: null };
     } else {
       link.readTrail = getWebReadTrail(link);
+    }
+    if (!isPdfUrl(link.url)) {
+      normalizeReaderLink(link);
     }
   }
   if (!state.ui.readPositions) state.ui.readPositions = {};
@@ -1643,10 +1781,7 @@ function pdfViewerPageUrl(link, restart) {
   const qs = new URLSearchParams();
   qs.set("url", link.url);
   if (restart) qs.set("mode", "restart");
-  const href = window.location.href.split("#")[0];
-  const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
-  const baseDir = slash >= 0 ? href.slice(0, slash + 1) : `${href}/`;
-  return `${baseDir}pdf-viewer.html?${qs.toString()}`;
+  return `/pdf-viewer.html?${qs.toString()}`;
 }
 
 function openPdfViewer(linkId, restart) {
@@ -1660,13 +1795,8 @@ function openPdfViewer(linkId, restart) {
 }
 
 function openWebLinkInNewTab(link) {
-  const normalized = normalizeUrl(link.url);
-  if (!normalized) {
-    alert("열 수 없는 링크입니다.");
-    return;
-  }
+  openOriginalUrl(link);
   link.lastVisitedAt = new Date().toISOString();
-  window.open(normalized, "_blank", "noopener,noreferrer");
   saveAndRender();
 }
 
@@ -1678,7 +1808,9 @@ function openLinkForReading(link) {
   if (isPdfUrl(link.url)) {
     openPdfViewer(link.id, false);
   } else {
-    openWebLinkInNewTab(link);
+    link.lastVisitedAt = new Date().toISOString();
+    saveAndRender();
+    openReader(link.id, false);
   }
 }
 
@@ -1740,6 +1872,13 @@ async function bootApp() {
     } catch (err) {
       alert(err?.message || "네이버 로그인에 실패했습니다.");
     }
+  }
+  const selectParam = new URLSearchParams(window.location.search).get("select");
+  if (selectParam && state.links.some((l) => l.id === selectParam)) {
+    state.ui.selectedLinkId = selectParam;
+    const selected = state.links.find((l) => l.id === selectParam);
+    if (selected?.categoryId) state.ui.selectedCategoryId = selected.categoryId;
+    history.replaceState(null, "", window.location.pathname);
   }
   render();
 }

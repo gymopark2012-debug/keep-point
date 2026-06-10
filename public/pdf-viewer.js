@@ -78,10 +78,7 @@
   }
 
   function indexPageHref() {
-    const href = window.location.href.split("#")[0];
-    const slash = Math.max(href.lastIndexOf("/"), href.lastIndexOf("\\"));
-    const baseDir = slash >= 0 ? href.slice(0, slash + 1) : "";
-    return `${baseDir}index.html`;
+    return "/";
   }
 
   function isPdfPath(u) {

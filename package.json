@@ -1,11 +1,18 @@
 {
-  "name": "keeppoint-minimal",
+  "name": "keeppoint",
   "private": true,
-  "description": "localhost 전용 KeepPoint 최소 예제",
+  "description": "KeepPoint — link reader with server-side article extraction",
   "scripts": {
-    "start": "npx --yes serve@14 . -p 3000"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "legacy:static": "npx --yes serve@14 public -p 3000"
   },
   "dependencies": {
-    "@vercel/analytics": "^2.0.1"
+    "@vercel/analytics": "^2.0.1",
+    "cheerio": "^1.0.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   }
 }

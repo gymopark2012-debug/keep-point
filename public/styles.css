@@ -182,6 +182,95 @@ textarea {
 .item .content-status.ready { color: #15803d; font-weight: 600; }
 .item .content-status.failed { color: #b45309; font-weight: 600; }
 .reader-detail-card .resume-actions { margin-top: 10px; }
+
+.reader-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: #faf7f2;
+  color: #1f2937;
+}
+.reader-overlay.hidden { display: none !important; }
+.reader-overlay .reader-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  flex-shrink: 0;
+}
+.reader-overlay .reader-title-wrap h1 { margin: 0; font-size: 18px; }
+.reader-overlay .reader-source { font-size: 12px; color: #2563eb; }
+.reader-overlay .reader-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 24px 16px 48px;
+  min-height: 0;
+}
+.reader-overlay .reader-article {
+  max-width: 720px;
+  margin: 0 auto;
+  font-family: Georgia, "Noto Serif KR", serif;
+  font-size: 18px;
+  line-height: 1.75;
+}
+.reader-overlay .reader-article p,
+.reader-overlay .reader-article li,
+.reader-overlay .reader-article blockquote { margin: 0 0 1em; }
+.reader-overlay .reader-article h1,
+.reader-overlay .reader-article h2,
+.reader-overlay .reader-article h3 {
+  font-family: system-ui, "Segoe UI", sans-serif;
+  line-height: 1.35;
+  margin: 1.4em 0 0.6em;
+}
+.reader-overlay .reader-article img { max-width: 100%; height: auto; }
+.reader-overlay .reader-article a { color: #2563eb; }
+.reader-overlay .reader-article [id^="kp-p-"].reader-current {
+  background: rgba(253, 224, 71, 0.35);
+  border-radius: 4px;
+}
+.reader-overlay .reader-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  overflow: auto;
+}
+.reader-overlay .reader-empty h2 { margin: 0; }
+.reader-overlay .reader-paste-label {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font-size: 14px;
+}
+.reader-overlay .reader-paste-label textarea {
+  width: 100%;
+  border: 1px solid #cad7ef;
+  border-radius: 8px;
+  padding: 10px;
+  font: inherit;
+  resize: vertical;
+}
+.reader-overlay .reader-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+  font-size: 12px;
+  color: #6b7280;
+  flex-shrink: 0;
+}
 .item .preview { margin-top: 6px; font-size: 12px; color: #5f6b7d; display: none; }
 .item:hover .preview { display: block; }
 

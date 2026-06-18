@@ -370,12 +370,196 @@ function getContentStatusLabel(status) {
 }
 
 function readerPageUrl(linkId, restart) {
-  const qs = restart ? "?mode=restart" : "";
-  return `/reader/${encodeURIComponent(linkId)}${qs}`;
+  const qs = restart ? "?restart=1" : "";
+  return `/#read/${encodeURIComponent(linkId)}${qs}`;
 }
 
-function openReader(linkId, restart) {
-  window.location.href = readerPageUrl(linkId, restart);
+let activeReaderLinkId = null;
+let readerSaveTimer = null;
+
+function persistStateOnly() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (auth.isLoggedIn) {
+    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(state));
+  }
+}
+
+function getReaderContentHtml(link) {
+  if (link.contentStatus === "ready" && String(link.content || "").trim()) {
+    return link.content;
+  }
+  const fallback = String(link.description || "").trim() || getWebMemo(link).keyPoints.trim();
+  if (fallback.length >= 40 && window.KeepPointContentExtract?.plainTextToReaderHtml) {
+    return window.KeepPointContentExtract.plainTextToReaderHtml(fallback);
+  }
+  return "";
+}
+
+function getReaderScrollRatio(container) {
+  const max = Math.max(1, container.scrollHeight - container.clientHeight);
+  return Math.max(0, Math.min(1, container.scrollTop / max));
+}
+
+function findReaderParagraphId(container) {
+  const blocks = container.querySelectorAll('[id^="kp-p-"]');
+  let lastId = null;
+  const marker = container.clientHeight * 0.35;
+  for (const el of blocks) {
+    if (el.offsetTop - container.scrollTop <= marker) lastId = el.id;
+  }
+  return lastId;
+}
+
+function saveReaderScrollPosition() {
+  const link = state.links.find((l) => l.id === activeReaderLinkId);
+  const scrollEl = document.getElementById("readerScroll");
+  if (!link || !scrollEl) return;
+  link.readerState = {
+    scrollRatio: getReaderScrollRatio(scrollEl),
+    lastParagraphId: findReaderParagraphId(scrollEl),
+    updatedAt: new Date().toISOString()
+  };
+  link.lastVisitedAt = new Date().toISOString();
+  persistStateOnly();
+  const progressEl = document.getElementById("readerProgress");
+  if (progressEl) progressEl.textContent = `${Math.round(link.readerState.scrollRatio * 100)}%`;
+  const statusEl = document.getElementById("readerSaveStatus");
+  if (statusEl) statusEl.textContent = "저장됨";
+}
+
+function scheduleReaderSave() {
+  const statusEl = document.getElementById("readerSaveStatus");
+  if (statusEl) statusEl.textContent = "저장 중...";
+  clearTimeout(readerSaveTimer);
+  readerSaveTimer = setTimeout(saveReaderScrollPosition, 350);
+}
+
+function restoreReaderScrollPosition(link, restart) {
+  const scrollEl = document.getElementById("readerScroll");
+  if (!scrollEl || restart) return;
+  const rs = getReaderState(link);
+  if (rs.lastParagraphId) {
+    const el = document.getElementById(rs.lastParagraphId);
+    if (el) {
+      el.scrollIntoView({ block: "start" });
+      el.classList.add("reader-current");
+      return;
+    }
+  }
+  if (rs.scrollRatio > 0) {
+    const max = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+    scrollEl.scrollTop = max * rs.scrollRatio;
+  }
+}
+
+function closeReaderOverlay(fromPopstate = false) {
+  saveReaderScrollPosition();
+  activeReaderLinkId = null;
+  const overlay = document.getElementById("readerOverlay");
+  if (overlay) {
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  document.body.style.overflow = "";
+  if (!fromPopstate) {
+    const base = window.location.pathname + window.location.search;
+    history.replaceState(null, "", base);
+  }
+  render();
+}
+
+function showReaderOverlay(link, restart) {
+  const overlay = document.getElementById("readerOverlay");
+  const scrollEl = document.getElementById("readerScroll");
+  const articleEl = document.getElementById("readerArticle");
+  const emptyEl = document.getElementById("readerEmpty");
+  const titleEl = document.getElementById("readerTitle");
+  const originalEl = document.getElementById("readerOriginalLink");
+  const progressEl = document.getElementById("readerProgress");
+  const originalUrl = getOriginalUrl(link);
+
+  if (!overlay || !scrollEl || !articleEl) {
+    window.location.href = `/reader.html?id=${encodeURIComponent(link.id)}`;
+    return;
+  }
+
+  activeReaderLinkId = link.id;
+  if (titleEl) titleEl.textContent = link.title || "Reader";
+  if (originalEl) {
+    originalEl.href = originalUrl || "#";
+    originalEl.textContent = originalUrl || "원본";
+  }
+
+  const html = getReaderContentHtml(link);
+  if (!html) {
+    scrollEl.classList.add("hidden");
+    emptyEl?.classList.remove("hidden");
+    const pasteInput = document.getElementById("readerPasteInput");
+    if (pasteInput) pasteInput.value = "";
+  } else {
+    articleEl.innerHTML = html;
+    scrollEl.classList.remove("hidden");
+    emptyEl?.classList.add("hidden");
+    requestAnimationFrame(() => restoreReaderScrollPosition(link, restart));
+  }
+
+  if (progressEl) {
+    const ratio = restart ? 0 : getReaderState(link).scrollRatio;
+    progressEl.textContent = `${Math.round(ratio * 100)}%`;
+  }
+
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+
+  if (!scrollEl.dataset.bound) {
+    scrollEl.dataset.bound = "1";
+    scrollEl.addEventListener("scroll", scheduleReaderSave, { passive: true });
+  }
+}
+
+function openReader(linkId, restart = false) {
+  const link = state.links.find((l) => l.id === linkId);
+  if (!link) {
+    alert("링크를 찾을 수 없습니다.");
+    return;
+  }
+  link.lastVisitedAt = new Date().toISOString();
+  persistStateOnly();
+  showReaderOverlay(link, restart);
+  history.pushState({ reader: linkId }, "", readerPageUrl(linkId, restart));
+}
+
+function bindReaderOverlayEvents() {
+  document.getElementById("readerBackBtn")?.addEventListener("click", closeReaderOverlay);
+  document.getElementById("readerOpenOriginalBtn")?.addEventListener("click", () => {
+    const link = state.links.find((l) => l.id === activeReaderLinkId);
+    if (link) openOriginalUrl(link);
+  });
+  document.getElementById("readerSavePasteBtn")?.addEventListener("click", () => {
+    const link = state.links.find((l) => l.id === activeReaderLinkId);
+    const text = document.getElementById("readerPasteInput")?.value || "";
+    if (!link) return;
+    saveManualReaderContent(link, text);
+    showReaderOverlay(link, true);
+  });
+  window.addEventListener("popstate", () => {
+    if (activeReaderLinkId && !location.hash.startsWith("#read/")) {
+      closeReaderOverlay(true);
+    }
+  });
+}
+
+function openReaderFromHash() {
+  const match = location.hash.match(/^#read\/([^/?#]+)/);
+  if (!match) return;
+  const linkId = decodeURIComponent(match[1]);
+  const restart = location.search.includes("restart=1");
+  const link = state.links.find((l) => l.id === linkId);
+  if (link) {
+    activeReaderLinkId = linkId;
+    showReaderOverlay(link, restart);
+  }
 }
 
 function openOriginalUrl(link) {
@@ -1808,8 +1992,6 @@ function openLinkForReading(link) {
   if (isPdfUrl(link.url)) {
     openPdfViewer(link.id, false);
   } else {
-    link.lastVisitedAt = new Date().toISOString();
-    saveAndRender();
     openReader(link.id, false);
   }
 }
@@ -1880,6 +2062,8 @@ async function bootApp() {
     if (selected?.categoryId) state.ui.selectedCategoryId = selected.categoryId;
     history.replaceState(null, "", window.location.pathname);
   }
+  bindReaderOverlayEvents();
+  openReaderFromHash();
   render();
 }
 

@@ -216,6 +216,33 @@ python -m http.server 8080</pre>
       </form>
     </dialog>
 
+    <div id="readerOverlay" class="reader-overlay hidden" aria-hidden="true">
+      <header class="reader-header">
+        <button type="button" id="readerBackBtn" class="btn ghost">← 목록</button>
+        <div class="reader-title-wrap">
+          <h1 id="readerTitle">Reader</h1>
+          <a id="readerOriginalLink" href="#" target="_blank" rel="noreferrer" class="reader-source">원본 보기</a>
+        </div>
+      </header>
+      <main id="readerScroll" class="reader-scroll">
+        <article id="readerArticle" class="reader-article"></article>
+      </main>
+      <aside id="readerEmpty" class="reader-empty hidden">
+        <h2>본문이 없습니다</h2>
+        <p id="readerEmptyText">본문 추출 실패, 직접 붙여넣기 필요</p>
+        <label class="reader-paste-label">
+          본문 직접 붙여넣기
+          <textarea id="readerPasteInput" rows="8" placeholder="기사 본문을 복사해 붙여넣으세요."></textarea>
+        </label>
+        <button type="button" id="readerSavePasteBtn" class="btn">본문 저장 후 읽기</button>
+        <button type="button" id="readerOpenOriginalBtn" class="btn ghost">원본 사이트 열기</button>
+      </aside>
+      <footer class="reader-footer">
+        <span id="readerProgress">0%</span>
+        <span id="readerSaveStatus">저장됨</span>
+      </footer>
+    </div>
+
     <script src="./auth-config.js"></script>
     <script src="./content-extract.js"></script>
     <script src="https://accounts.google.com/gsi/client" async defer></script>

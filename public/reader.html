@@ -2,35 +2,14 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="refresh" content="0;url=/" />
+    <script>
+      const id = new URLSearchParams(location.search).get("id");
+      location.replace(id ? "/#read/" + encodeURIComponent(id) : "/");
+    </script>
     <title>Reader · KeepPoint</title>
-    <link rel="stylesheet" href="/reader.css" />
   </head>
   <body>
-    <header class="reader-header">
-      <button type="button" id="backBtn" class="btn ghost">← 목록</button>
-      <div class="reader-title-wrap">
-        <h1 id="readerTitle">Reader</h1>
-        <a id="originalLink" href="#" target="_blank" rel="noreferrer" class="reader-source">원본 보기</a>
-      </div>
-    </header>
-
-    <main id="readerScroll" class="reader-scroll">
-      <article id="readerArticle" class="reader-article"></article>
-    </main>
-
-    <aside id="readerEmpty" class="reader-empty hidden">
-      <h2>본문이 없습니다</h2>
-      <p id="readerEmptyText">본문 추출 실패, 직접 붙여넣기 필요</p>
-      <button type="button" id="goDetailBtn" class="btn">목록에서 본문 붙여넣기</button>
-      <button type="button" id="openOriginalBtn" class="btn ghost">원본 사이트 열기</button>
-    </aside>
-
-    <footer class="reader-footer">
-      <span id="readerProgress">0%</span>
-      <span id="readerSaveStatus">저장됨</span>
-    </footer>
-
-    <script src="/reader.js"></script>
+    <p>Reader로 이동 중… <a href="/">목록으로</a></p>
   </body>
 </html>

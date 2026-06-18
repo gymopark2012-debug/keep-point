@@ -193,6 +193,7 @@ textarea {
   color: #1f2937;
 }
 .reader-overlay.hidden { display: none !important; }
+.hidden { display: none !important; }
 .reader-overlay .reader-header {
   display: flex;
   align-items: flex-start;
@@ -271,6 +272,21 @@ textarea {
   color: #6b7280;
   flex-shrink: 0;
 }
+.paste-fallback-dialog {
+  width: min(560px, calc(100vw - 24px));
+}
+.paste-fallback-lead { margin-top: 0; }
+.fallback-paste-card {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+.fallback-paste-field textarea {
+  min-height: 180px;
+}
+.fallback-hint {
+  color: #b45309;
+  font-weight: 600;
+}
 .item .preview { margin-top: 6px; font-size: 12px; color: #5f6b7d; display: none; }
 .item:hover .preview { display: block; }
 
@@ -281,10 +297,14 @@ textarea {
   display: flex;
   gap: 6px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity .18s;
 }
 .item:hover .hover-actions,
-.detail:hover .hover-actions { opacity: 1; }
+.detail:hover .hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 .btn {
   border: 1px solid #2563eb;

@@ -158,6 +158,7 @@
     extractFromUrl,
     extractFromDocument,
     plainTextToReaderHtml,
+    readerHtmlToPlainText: stripTags,
     assignParagraphIds
   };
 })();

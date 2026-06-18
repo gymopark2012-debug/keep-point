@@ -216,6 +216,26 @@ python -m http.server 8080</pre>
       </form>
     </dialog>
 
+    <dialog id="pasteFallbackModal" class="paste-fallback-dialog">
+      <form method="dialog" id="pasteFallbackForm">
+        <h3>본문 추출 실패</h3>
+        <p class="meta paste-fallback-lead">
+          Readability 자동 추출이 이 사이트에서 되지 않았습니다.<br />
+          원문 페이지에서 본문을 복사해 아래에 붙여넣어 주세요.
+        </p>
+        <p class="meta" id="pasteFallbackUrl"></p>
+        <label class="trail-field">
+          본문 직접 붙여넣기
+          <textarea id="pasteFallbackInput" rows="12" placeholder="기사·블로그 본문을 그대로 붙여넣으세요."></textarea>
+        </label>
+        <menu>
+          <button type="submit" value="cancel" formnovalidate>나중에</button>
+          <button type="button" class="btn ghost" id="pasteFallbackOpenOriginalBtn">원본 열기</button>
+          <button type="button" class="btn" id="pasteFallbackSaveBtn">본문 저장</button>
+        </menu>
+      </form>
+    </dialog>
+
     <div id="readerOverlay" class="reader-overlay hidden" aria-hidden="true">
       <header class="reader-header">
         <button type="button" id="readerBackBtn" class="btn ghost">← 목록</button>
@@ -234,7 +254,7 @@ python -m http.server 8080</pre>
           본문 직접 붙여넣기
           <textarea id="readerPasteInput" rows="8" placeholder="기사 본문을 복사해 붙여넣으세요."></textarea>
         </label>
-        <button type="button" id="readerSavePasteBtn" class="btn">본문 저장 후 읽기</button>
+        <button type="button" id="readerSavePasteBtn" class="btn">본문 저장</button>
         <button type="button" id="readerOpenOriginalBtn" class="btn ghost">원본 사이트 열기</button>
       </aside>
       <footer class="reader-footer">

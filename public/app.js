@@ -540,8 +540,9 @@ function bindReaderOverlayEvents() {
     const link = state.links.find((l) => l.id === activeReaderLinkId);
     const text = document.getElementById("readerPasteInput")?.value || "";
     if (!link) return;
-    saveManualReaderContent(link, text);
-    showReaderOverlay(link, true);
+    if (saveManualReaderContent(link, text)) {
+      showReaderOverlay(link, true);
+    }
   });
   window.addEventListener("popstate", () => {
     if (activeReaderLinkId && !location.hash.startsWith("#read/")) {
@@ -581,18 +582,42 @@ async function extractAndApplyToLink(link) {
   link.content = result.content || "";
   link.contentStatus = result.status === "ready" ? "ready" : "failed";
   saveAndRender();
+  if (link.contentStatus === "failed") {
+    openPasteFallbackModal(link);
+  }
 }
 
 function saveManualReaderContent(link, rawText) {
   const text = String(rawText || "").trim();
   if (!text) {
     alert("붙여넣을 본문을 입력해 주세요.");
-    return;
+    return false;
   }
+  const wasReady = link.contentStatus === "ready";
   link.content = window.KeepPointContentExtract.plainTextToReaderHtml(text);
   link.contentStatus = "ready";
-  link.readerState = { scrollRatio: 0, lastParagraphId: null, updatedAt: null };
+  if (!wasReady) {
+    link.readerState = { scrollRatio: 0, lastParagraphId: null, updatedAt: null };
+  }
+  state.ui.editingManualContentLinkId = null;
   saveAndRender();
+  return true;
+}
+
+function openPasteFallbackModal(link) {
+  if (!pasteFallbackModal || !link) return;
+  pasteFallbackLinkId = link.id;
+  if (pasteFallbackUrl) {
+    pasteFallbackUrl.textContent = getOriginalUrl(link);
+  }
+  if (pasteFallbackInput) pasteFallbackInput.value = "";
+  pasteFallbackModal.showModal();
+  pasteFallbackInput?.focus();
+}
+
+function closePasteFallbackModal() {
+  pasteFallbackLinkId = null;
+  if (pasteFallbackModal?.open) pasteFallbackModal.close();
 }
 
 const defaultData = {
@@ -636,7 +661,8 @@ const defaultData = {
     selectedLinkId: "l2",
     expandedDescription: false,
     readPositions: {},
-    loginPromptedForLimit: false
+    loginPromptedForLimit: false,
+    editingManualContentLinkId: null
   }
 };
 
@@ -688,6 +714,13 @@ const profileNameInput = document.getElementById("profileNameInput");
 const profileEmailInput = document.getElementById("profileEmailInput");
 const profileProviderInput = document.getElementById("profileProviderInput");
 const deleteAccountBtn = document.getElementById("deleteAccountBtn");
+const pasteFallbackModal = document.getElementById("pasteFallbackModal");
+const pasteFallbackForm = document.getElementById("pasteFallbackForm");
+const pasteFallbackInput = document.getElementById("pasteFallbackInput");
+const pasteFallbackUrl = document.getElementById("pasteFallbackUrl");
+const pasteFallbackSaveBtn = document.getElementById("pasteFallbackSaveBtn");
+const pasteFallbackOpenOriginalBtn = document.getElementById("pasteFallbackOpenOriginalBtn");
+let pasteFallbackLinkId = null;
 let authModalMode = "login";
 const guestNotice = document.getElementById("guestNotice");
 const syncAcrossDevicesBtn = document.getElementById("syncAcrossDevicesBtn");
@@ -734,6 +767,26 @@ if (quickAddBtn) quickAddBtn.addEventListener("click", addQuickLinkFromInput);
 if (pickPdfBtn && pdfFileInput) {
   pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
   pdfFileInput.addEventListener("change", onPdfFileSelected);
+}
+if (pasteFallbackSaveBtn) {
+  pasteFallbackSaveBtn.addEventListener("click", () => {
+    const link = state.links.find((l) => l.id === pasteFallbackLinkId);
+    if (!link) return;
+    if (saveManualReaderContent(link, pasteFallbackInput?.value || "")) {
+      closePasteFallbackModal();
+    }
+  });
+}
+if (pasteFallbackOpenOriginalBtn) {
+  pasteFallbackOpenOriginalBtn.addEventListener("click", () => {
+    const link = state.links.find((l) => l.id === pasteFallbackLinkId);
+    if (link) openOriginalUrl(link);
+  });
+}
+if (pasteFallbackForm) {
+  pasteFallbackForm.addEventListener("close", () => {
+    pasteFallbackLinkId = null;
+  });
 }
 
 function requireLoginFor(reason) {
@@ -1143,8 +1196,9 @@ async function addQuickLinkFromInput() {
   state.ui.selectedCategoryId = targetCategoryId;
   selectLink(link.id);
   quickAddInput.value = "";
+  saveAndRender();
   if (!isPdf && contentStatus === "failed") {
-    alert("본문 추출 실패, 직접 붙여넣기 필요\n상세 패널에서 본문을 붙여넣을 수 있습니다.");
+    openPasteFallbackModal(link);
   }
   maybePromptLoginByLimit(previousCount);
 }
@@ -1429,21 +1483,36 @@ function renderDetail() {
     pdfSnap && pdfSnap.pageNumber != null ? `마지막 페이지: ${pdfSnap.pageNumber}` : "저장된 페이지 없음";
 
   const webMemoHtml = `
-    <section class="resume-card reader-detail-card">
+    <section class="resume-card reader-detail-card ${link.contentStatus !== "ready" || state.ui.editingManualContentLinkId === link.id ? "fallback-paste-card" : ""}">
       <strong>KeepPoint Reader</strong>
       <p class="meta content-status ${link.contentStatus === "ready" ? "ready" : "failed"}">${escapeHtml(getContentStatusLabel(link.contentStatus))}</p>
+      ${link.contentStatus !== "ready"
+        ? `<p class="meta fallback-hint">자동 추출이 실패했습니다. 아래에 본문을 붙여넣거나 「본문 붙여넣기」 버튼을 사용하세요.</p>`
+        : ""}
       <p class="meta">읽기 진행: ${Math.round(getReaderState(link).scrollRatio * 100)}%</p>
       <div class="resume-actions">
         <button type="button" class="btn" id="continueReaderBtn">이어보기</button>
         <button type="button" class="btn ghost" id="openOriginalBtn">원본 보기</button>
         <button type="button" class="btn ghost" id="retryExtractBtn">본문 다시 가져오기</button>
+        ${link.contentStatus !== "ready" ? `<button type="button" class="btn ghost" id="openPasteFallbackBtn">본문 붙여넣기</button>` : ""}
+        ${link.contentStatus === "ready" && state.ui.editingManualContentLinkId !== link.id
+          ? `<button type="button" class="btn ghost" id="editManualContentBtn">본문 수정하기</button>`
+          : ""}
       </div>
       ${link.contentStatus !== "ready"
-        ? `<label class="trail-field">본문 직접 붙여넣기
-            <textarea id="manualContentInput" rows="10" placeholder="기사 본문을 복사해 붙여넣으세요."></textarea>
+        ? `<label class="trail-field fallback-paste-field">본문 직접 붙여넣기
+            <textarea id="manualContentInput" rows="10" placeholder="원문 사이트에서 본문을 복사해 붙여넣으세요."></textarea>
           </label>
           <button type="button" class="btn" id="saveManualContentBtn">본문 저장</button>`
-        : ""}
+        : state.ui.editingManualContentLinkId === link.id
+          ? `<label class="trail-field fallback-paste-field">본문 수정
+              <textarea id="manualContentInput" rows="10" placeholder="본문을 수정하세요.">${escapeHtml(window.KeepPointContentExtract?.readerHtmlToPlainText?.(link.content) || "")}</textarea>
+            </label>
+            <div class="resume-actions">
+              <button type="button" class="btn" id="saveManualContentBtn">본문 저장</button>
+              <button type="button" class="btn ghost" id="cancelEditManualContentBtn">취소</button>
+            </div>`
+          : ""}
     </section>
     <section class="resume-card">
       <strong>메모</strong>
@@ -1504,6 +1573,9 @@ function renderDetail() {
   const retryExtractBtn = document.getElementById("retryExtractBtn");
   const manualContentInput = document.getElementById("manualContentInput");
   const saveManualContentBtn = document.getElementById("saveManualContentBtn");
+  const openPasteFallbackBtn = document.getElementById("openPasteFallbackBtn");
+  const editManualContentBtn = document.getElementById("editManualContentBtn");
+  const cancelEditManualContentBtn = document.getElementById("cancelEditManualContentBtn");
   let draftDesc = link.description || "";
   let draftTags = [...link.tags];
 
@@ -1637,6 +1709,15 @@ function renderDetail() {
     saveManualContentBtn?.addEventListener("click", () => {
       saveManualReaderContent(link, manualContentInput?.value || "");
     });
+    editManualContentBtn?.addEventListener("click", () => {
+      state.ui.editingManualContentLinkId = link.id;
+      saveAndRender();
+    });
+    cancelEditManualContentBtn?.addEventListener("click", () => {
+      state.ui.editingManualContentLinkId = null;
+      saveAndRender();
+    });
+    openPasteFallbackBtn?.addEventListener("click", () => openPasteFallbackModal(link));
     if (webWhySavedInput) webWhySavedInput.addEventListener("blur", onWebMemoInput);
     if (webKeyPointsInput) webKeyPointsInput.addEventListener("blur", onWebMemoInput);
     if (webTagsInput) webTagsInput.addEventListener("blur", onWebMemoInput);
@@ -1657,11 +1738,8 @@ function renderDetail() {
     if (openPdfBtn) openPdfBtn.removeEventListener("click", onOpenPdfClick);
     if (restartPdfBtn) restartPdfBtn.removeEventListener("click", onRestartPdfClick);
     if (clearPdfBtn) clearPdfBtn.removeEventListener("click", onClearPdfClick);
-    if (webReadHintInput) webReadHintInput.removeEventListener("blur", onWebMemoInput);
     if (webWhySavedInput) webWhySavedInput.removeEventListener("blur", onWebMemoInput);
     if (webKeyPointsInput) webKeyPointsInput.removeEventListener("blur", onWebMemoInput);
-    if (webThoughtsInput) webThoughtsInput.removeEventListener("blur", onWebMemoInput);
-    if (webNextPointInput) webNextPointInput.removeEventListener("blur", onWebMemoInput);
     if (webTagsInput) webTagsInput.removeEventListener("blur", onWebMemoInput);
     if (shareCurrentBtn) shareCurrentBtn.removeEventListener("click", onShareClick);
     if (deleteCurrentBtn) deleteCurrentBtn.removeEventListener("click", onDeleteClick);
@@ -1671,6 +1749,9 @@ function renderDetail() {
 function selectLink(linkId) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
+  if (state.ui.editingManualContentLinkId && state.ui.editingManualContentLinkId !== linkId) {
+    state.ui.editingManualContentLinkId = null;
+  }
   state.ui.selectedLinkId = linkId;
   state.ui.expandedDescription = false;
   link.lastVisitedAt = new Date().toISOString();
@@ -1765,6 +1846,7 @@ function normalizeState() {
   }
   if (!state.profile || typeof state.profile !== "object") state.profile = { name: "게스트" };
   if (!state.ui.loginPromptedForLimit) state.ui.loginPromptedForLimit = false;
+  if (state.ui.editingManualContentLinkId === undefined) state.ui.editingManualContentLinkId = null;
   for (const link of state.links || []) {
     if (!link.webMemo || typeof link.webMemo !== "object") {
       const legacyTrail = getWebReadTrail(link);

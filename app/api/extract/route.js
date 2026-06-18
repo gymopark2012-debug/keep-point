@@ -1,5 +1,7 @@
 import { extractArticleFromUrl } from "@/lib/extract-article.js";
 
+export const runtime = "nodejs";
+
 function isValidHttpUrl(value) {
   try {
     const u = new URL(value);
@@ -27,6 +29,7 @@ export async function POST(request) {
     originalUrl: result.originalUrl || url,
     title: result.title || "",
     content: result.content || "",
-    status: result.status
+    status: result.status,
+    method: result.method || "unknown"
   });
 }

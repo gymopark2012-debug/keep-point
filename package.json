@@ -9,8 +9,10 @@
     "legacy:static": "npx --yes serve@14 public -p 3000"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@vercel/analytics": "^2.0.1",
     "cheerio": "^1.0.0",
+    "jsdom": "^26.0.0",
     "next": "^15.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -19,7 +19,7 @@
     <header class="topbar">
       <div>
         <h1>KeepPoint</h1>
-        <p>열자마자 바로 이어서 읽게 만든다</p>
+        <p>URL만 붙여넣으면 기억 포인트가 자동으로 남아요</p>
       </div>
       <div class="topbar-auth">
         <div class="profile-chip" id="profileName">게스트</div>
@@ -38,13 +38,13 @@
 
     <main class="layout">
       <section class="panel middle">
-        <h2>최근 읽던 것</h2>
+        <h2>최근 기억 포인트</h2>
         <ol id="recentList" class="recent-list"></ol>
 
         <div class="quick-add">
           <label for="quickAddInput">빠른 링크 추가</label>
           <div class="quick-add-row">
-            <input id="quickAddInput" placeholder="링크 붙여넣고 Enter..." />
+            <input id="quickAddInput" placeholder="링크 붙여넣으면 자동 저장..." />
             <button type="button" class="btn" id="quickAddBtn">추가</button>
           </div>
         </div>
@@ -67,10 +67,10 @@
 
       <section class="panel right">
         <div class="section-header">
-          <h2>링크 상세</h2>
+          <h2>기억 포인트</h2>
         </div>
         <article id="detailView" class="detail empty">
-          링크를 선택하면 상세 내용이 표시됩니다.
+          링크를 저장하면 기억 포인트가 여기에 나타납니다.
         </article>
       </section>
     </main>
@@ -216,55 +216,7 @@ python -m http.server 8080</pre>
       </form>
     </dialog>
 
-    <dialog id="pasteFallbackModal" class="paste-fallback-dialog">
-      <form method="dialog" id="pasteFallbackForm">
-        <h3>본문 추출 실패</h3>
-        <p class="meta paste-fallback-lead">
-          Readability 자동 추출이 이 사이트에서 되지 않았습니다.<br />
-          원문 페이지에서 본문을 복사해 아래에 붙여넣어 주세요.
-        </p>
-        <p class="meta" id="pasteFallbackUrl"></p>
-        <label class="trail-field">
-          본문 직접 붙여넣기
-          <textarea id="pasteFallbackInput" rows="12" placeholder="기사·블로그 본문을 그대로 붙여넣으세요."></textarea>
-        </label>
-        <menu>
-          <button type="submit" value="cancel" formnovalidate>나중에</button>
-          <button type="button" class="btn ghost" id="pasteFallbackOpenOriginalBtn">원본 열기</button>
-          <button type="button" class="btn" id="pasteFallbackSaveBtn">본문 저장</button>
-        </menu>
-      </form>
-    </dialog>
-
-    <div id="readerOverlay" class="reader-overlay hidden" aria-hidden="true">
-      <header class="reader-header">
-        <button type="button" id="readerBackBtn" class="btn ghost">← 목록</button>
-        <div class="reader-title-wrap">
-          <h1 id="readerTitle">Reader</h1>
-          <a id="readerOriginalLink" href="#" target="_blank" rel="noreferrer" class="reader-source">원본 보기</a>
-        </div>
-      </header>
-      <main id="readerScroll" class="reader-scroll">
-        <article id="readerArticle" class="reader-article"></article>
-      </main>
-      <aside id="readerEmpty" class="reader-empty hidden">
-        <h2>본문이 없습니다</h2>
-        <p id="readerEmptyText">본문 추출 실패, 직접 붙여넣기 필요</p>
-        <label class="reader-paste-label">
-          본문 직접 붙여넣기
-          <textarea id="readerPasteInput" rows="8" placeholder="기사 본문을 복사해 붙여넣으세요."></textarea>
-        </label>
-        <button type="button" id="readerSavePasteBtn" class="btn">본문 저장</button>
-        <button type="button" id="readerOpenOriginalBtn" class="btn ghost">원본 사이트 열기</button>
-      </aside>
-      <footer class="reader-footer">
-        <span id="readerProgress">0%</span>
-        <span id="readerSaveStatus">저장됨</span>
-      </footer>
-    </div>
-
     <script src="./auth-config.js"></script>
-    <script src="./content-extract.js"></script>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script src="./app.js"></script>
   </body>

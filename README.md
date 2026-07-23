@@ -1,53 +1,26 @@
 # KeepPoint
 
-링크·PDF를 카테고리별로 저장하고, **내부 Reader**에서 이어 읽는 앱입니다.
+**읽던 흐름을 잃지 않고 바로 이어 읽게** — 사용자가 직접 입력하거나 조작하지 않아도 됩니다.
 
-## 실행 방법 (Next.js)
+KeepPoint의 경쟁력은 **자동으로 읽기 맥락을 복원**하는 경험입니다.
 
-```bash
-npm install
-npm run dev
-```
+## 원칙
 
-브라우저에서 `http://localhost:3000` 을 엽니다.
+- URL만 붙여넣으면 저장된다
+- 본문 추출에 의존하지 않는다 (메타데이터만 수집)
+- 원문은 새 탭에서 연다 (앱 안에서 렌더링하지 않음)
+- 읽기 세션은 자동 기록된다 (버튼·메모·위치 표시 없음)
+- 돌아왔을 때 **읽기 맥락 카드**로 「이 글을 왜 읽고 있었는지」를 떠올린다
 
-- **웹 링크 본문 추출**: 서버 API `POST /api/extract` (cheerio, CORS 없음)
-- **Reader**: `/reader/[링크ID]`
-- **정적 UI**: `public/` (index.html, app.js, reader 등)
+## UX
 
-## API
+1. **링크 저장** → URL 붙여넣기만
+2. **자동 메타 수집** → 제목 · 사이트명 · OG 이미지 · description (실패해도 저장됨)
+3. **원문 열기** → 새 탭 + 열기 횟수·시간 자동 기록
+4. **다시 방문** → 맥락 카드 (언제 · 얼마나 · 왜 · 같은 카테고리 자료)
 
-```http
-POST /api/extract
-Content-Type: application/json
-
-{ "url": "https://example.com/article" }
-```
-
-응답:
-
-```json
-{
-  "originalUrl": "https://example.com/article",
-  "title": "제목",
-  "content": "<p id=\"kp-p-0\">...</p>",
-  "status": "ready"
-}
-```
-
-`status`가 `failed`이면 앱에서 「본문 추출 실패, 직접 붙여넣기 필요」가 표시됩니다.
-
-## 포함 기능
-
-- 카테고리·링크 목록, 메모
-- **웹**: 서버 추출 → KeepPoint Reader에서 읽기 + 스크롤 위치 저장
-- **PDF**: `pdf-viewer.html` (PDF.js)
-- Chrome 확장 (`extension/`)
-
-## 레거시 (API 없이 정적만)
+## 실행
 
 ```bash
-npm run legacy:static
+npm install && npm run dev
 ```
-
-※ 이 모드에서는 `/api/extract`가 없어 **본문 자동 추출이 동작하지 않습니다.**

@@ -1,4 +1,4 @@
-import { extractArticleFromUrl } from "@/lib/extract-article.js";
+import { fetchLinkMeta } from "@/lib/fetch-link-meta.js";
 
 export const runtime = "nodejs";
 
@@ -24,12 +24,6 @@ export async function POST(request) {
     return Response.json({ error: "Valid http(s) url is required" }, { status: 400 });
   }
 
-  const result = await extractArticleFromUrl(url);
-  return Response.json({
-    originalUrl: result.originalUrl || url,
-    title: result.title || "",
-    content: result.content || "",
-    status: result.status,
-    method: result.method || "unknown"
-  });
+  const result = await fetchLinkMeta(url);
+  return Response.json(result);
 }

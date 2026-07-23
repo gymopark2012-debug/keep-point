@@ -25,8 +25,9 @@ function getPdfSnapshotFromStorage(linkUrl) {
 }
 
 const IDB_NAME = "keepPointDB";
-const IDB_VERSION = 1;
+const IDB_VERSION = 2;
 const IDB_STORE = "localPdfs";
+const IDB_SNAPSHOT_STORE = "snapshots";
 
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -38,8 +39,549 @@ function idbOpen() {
       if (!db.objectStoreNames.contains(IDB_STORE)) {
         db.createObjectStore(IDB_STORE, { keyPath: "id" });
       }
+      if (!db.objectStoreNames.contains(IDB_SNAPSHOT_STORE)) {
+        db.createObjectStore(IDB_SNAPSHOT_STORE, { keyPath: "id" });
+      }
     };
   });
+}
+
+const IDB_VISUAL_STORE = "snapshots";
+
+async function idbDeleteVisualRecord(linkId) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_VISUAL_STORE, "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore(IDB_VISUAL_STORE).delete(linkId);
+  });
+}
+
+const snapshotPreviewCache = new Map();
+const snapshotSaveTasks = new Map();
+let tesseractLoadPromise = null;
+
+async function idbSaveScreenshot(linkId, dataUrl) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_VISUAL_STORE, "readwrite");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.objectStore(IDB_VISUAL_STORE).put({
+      id: linkId,
+      dataUrl,
+      updatedAt: new Date().toISOString()
+    });
+  });
+}
+
+async function idbLoadScreenshot(refId) {
+  if (!refId) return null;
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_VISUAL_STORE, "readonly");
+    const req = tx.objectStore(IDB_VISUAL_STORE).get(refId);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result?.dataUrl || null);
+  });
+}
+
+function getSnapshotPreview(linkId) {
+  return snapshotPreviewCache.get(linkId) || null;
+}
+
+async function runSnapshotOcr(dataUrl) {
+  try {
+    if (!tesseractLoadPromise) {
+      tesseractLoadPromise = import("https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js");
+    }
+    const mod = await tesseractLoadPromise;
+    const Tesseract = mod.default || mod;
+    const { data } = await Tesseract.recognize(dataUrl, "kor+eng", { logger: () => {} });
+    return String(data?.text || "").trim();
+  } catch (err) {
+    console.warn("[snapshot-ocr]", err);
+    return "";
+  }
+}
+
+async function fetchSnapshotKeyword({ ocrText, title, url, screenshot }) {
+  try {
+    const res = await fetch("/api/snapshot/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ocrText, title, url, screenshot })
+    });
+    if (!res.ok) return { keyword: "" };
+    return res.json();
+  } catch {
+    return { keyword: "" };
+  }
+}
+
+function compressSnapshotImage(dataUrl, maxWidth = 1400) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+      const width = Math.round(img.width * scale);
+      const height = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.82));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+function patchReadingSnapshot(linkId, patch) {
+  const target = state.links.find((item) => item.id === linkId);
+  if (!target) return null;
+  const base = normalizeReadingSnapshotFields(target.readingSnapshot, target);
+  target.readingSnapshot = { ...base, ...patch };
+  return target.readingSnapshot;
+}
+
+async function saveSnapshotFromImage(link, dataUrl) {
+  if (!link?.id || !dataUrl || snapshotSaveTasks.has(link.id)) return;
+  const linkId = link.id;
+
+  patchReadingSnapshot(linkId, {
+    screenshotRef: linkId,
+    status: "processing",
+    savedAt: new Date().toISOString()
+  });
+  snapshotPreviewCache.set(linkId, dataUrl);
+  persistStateOnly();
+  saveAndRender();
+
+  const task = (async () => {
+    try {
+      await idbSaveScreenshot(linkId, dataUrl);
+
+      patchReadingSnapshot(linkId, {
+        status: "ready",
+        savedAt: new Date().toISOString()
+      });
+      saveAndRender();
+
+      try {
+        const ocrText = await runSnapshotOcr(dataUrl);
+        const result = await fetchSnapshotKeyword({
+          ocrText,
+          title: link.title,
+          url: link.originalUrl || link.url,
+          screenshot: ocrText ? "" : dataUrl
+        });
+        patchReadingSnapshot(linkId, {
+          keyword: String(result.keyword || "").trim().slice(0, 16)
+        });
+      } catch (keywordErr) {
+        console.warn("[snapshot-keyword]", keywordErr);
+      }
+    } catch (err) {
+      console.error("[saveSnapshot]", err);
+      patchReadingSnapshot(linkId, { status: "failed" });
+    } finally {
+      snapshotSaveTasks.delete(linkId);
+      saveAndRender();
+    }
+  })();
+
+  snapshotSaveTasks.set(linkId, task);
+}
+
+async function hydrateSnapshotPreview(link) {
+  if (!link?.id) return null;
+  if (snapshotPreviewCache.has(link.id)) return snapshotPreviewCache.get(link.id);
+
+  const screenshotRef = link.readingSnapshot?.screenshotRef;
+  if (!screenshotRef) return null;
+
+  const refs = [screenshotRef, link.id].filter((value, index, list) => value && list.indexOf(value) === index);
+  for (const ref of refs) {
+    try {
+      const dataUrl = await idbLoadScreenshot(ref);
+      if (dataUrl) {
+        snapshotPreviewCache.set(link.id, dataUrl);
+        return dataUrl;
+      }
+    } catch (err) {
+      console.warn("[snapshot-load]", err);
+    }
+  }
+  return null;
+}
+
+function openSnapshotLightbox(src) {
+  if (!src) return;
+
+  document.getElementById("snapshotLightbox")?.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "snapshotLightbox";
+  overlay.className = "snapshot-lightbox";
+  overlay.innerHTML = `
+    <button type="button" class="snapshot-lightbox-close" aria-label="닫기">×</button>
+    <img class="snapshot-lightbox-image" src="${escapeAttr(src)}" alt="읽던 화면" />
+  `;
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKeyDown);
+  };
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") close();
+  };
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay || event.target.closest(".snapshot-lightbox-close")) close();
+  });
+  document.addEventListener("keydown", onKeyDown);
+  document.body.appendChild(overlay);
+}
+
+function renderSnapshotScreenTitle() {
+  return `<h3 class="snapshot-screen-title">지난번 읽던 화면</h3>`;
+}
+
+function renderSnapshotLinkHeader(link) {
+  const domain = getLinkSourceName(link);
+  const title = String(link?.title || "").trim() || domain;
+  return `
+    <header class="snapshot-link-header">
+      <h2 class="snapshot-link-title">${escapeHtml(shortText(title, 72))}</h2>
+      <p class="snapshot-link-domain">${escapeHtml(domain)}</p>
+    </header>`;
+}
+
+function formatSnapshotSavedTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = date.toDateString() === yesterday.toDateString();
+
+  const hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const period = hours < 12 ? "오전" : "오후";
+  const hour12 = hours % 12 || 12;
+  const timeStr = `${period} ${hour12}:${minutes}`;
+
+  if (isToday) return `오늘 ${timeStr}`;
+  if (isYesterday) return `어제 ${timeStr}`;
+
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  return `${month}월 ${day}일 ${timeStr}`;
+}
+
+function renderSnapshotKeyword(keyword) {
+  if (!keyword) return "";
+  return `<p class="snapshot-keyword"><span class="snapshot-meta-icon" aria-hidden="true">🏷️</span> ${escapeHtml(keyword)}</p>`;
+}
+
+function renderSnapshotTime(iso) {
+  const label = formatSnapshotSavedTime(iso);
+  if (!label) return "";
+  return `<p class="snapshot-time"><span class="snapshot-meta-icon" aria-hidden="true">🕒</span> ${escapeHtml(label)}</p>`;
+}
+
+function renderSnapshotPreview(preview, { lazy = false, loading = false } = {}) {
+  if (preview) {
+    return `
+      <button type="button" class="snapshot-preview-button" id="snapshotPreviewBtn" aria-label="읽던 화면 크게 보기">
+        <img class="snapshot-preview snapshot-preview--core" src="${escapeAttr(preview)}" alt="읽던 화면"${lazy ? ' loading="lazy"' : ""} />
+        <span class="snapshot-preview-zoom-hint">탭해서 크게 보기</span>
+      </button>`;
+  }
+  if (loading) {
+    return `<div class="snapshot-preview-loading" aria-busy="true">읽던 화면을 불러오는 중…</div>`;
+  }
+  return renderSnapshotUploadZone();
+}
+
+function renderSnapshotUploadZone() {
+  return `
+    <div class="snapshot-upload" id="snapshotPasteZone" tabindex="0" role="button" aria-label="읽던 화면 붙여넣기">
+      <p class="snapshot-upload-prompt">읽던 화면을 붙여넣어 주세요.</p>
+      <span class="snapshot-upload-hint">Ctrl+V 붙여넣기 · 드래그 앤 드롭 · 클릭해서 선택</span>
+      <input type="file" id="snapshotFileInput" accept="image/*" hidden />
+    </div>`;
+}
+
+function renderSnapshotPanel(link) {
+  const snap = getReadingSnapshot(link);
+  const preview = getSnapshotPreview(link?.id);
+  const continueBtn = `<button type="button" class="btn snapshot-continue-btn" id="continueOriginalBtn">원문에서 이어 읽기</button>`;
+  const previewBlock = (options = {}) => renderSnapshotPreview(preview, options);
+
+  if (!preview && snap?.status !== "processing") {
+    return `
+      <section class="reading-moment-card reading-moment-card--empty" aria-label="읽기 순간 없음">
+        ${renderSnapshotScreenTitle()}
+        <div class="snapshot-preview-wrap">${renderSnapshotUploadZone()}</div>
+        ${continueBtn}
+      </section>`;
+  }
+
+  if (snap.status === "processing") {
+    return `
+      <section class="reading-moment-card reading-moment-card--processing" aria-busy="true" aria-label="저장 중">
+        <div class="snapshot-recall">
+          ${renderSnapshotScreenTitle()}
+          <div class="snapshot-preview-wrap">${previewBlock()}</div>
+          <p class="snapshot-status">읽던 순간을 저장하는 중…</p>
+        </div>
+      </section>`;
+  }
+
+  return `
+    <section class="reading-moment-card" aria-label="읽기 순간">
+      <div class="snapshot-recall">
+        ${renderSnapshotScreenTitle()}
+        <div class="snapshot-preview-wrap">${previewBlock({ lazy: true })}</div>
+        ${renderSnapshotKeyword(snap.keyword)}
+        ${renderSnapshotTime(snap.savedAt)}
+      </div>
+      ${continueBtn}
+    </section>`;
+}
+
+function bindSnapshotPanelEvents(root, link) {
+  if (!root || !link) return () => {};
+
+  const pasteZone = root.querySelector("#snapshotPasteZone");
+  const fileInput = root.querySelector("#snapshotFileInput");
+  const continueBtn = root.querySelector("#continueOriginalBtn");
+  const linkId = link.id;
+
+  const handleImage = async (dataUrl) => {
+    if (!dataUrl) return;
+    const current = state.links.find((item) => item.id === linkId);
+    if (!current) return;
+    const compressed = await compressSnapshotImage(dataUrl);
+    void saveSnapshotFromImage(current, compressed);
+  };
+
+  const readImageFile = (file) => {
+    if (!file || !String(file.type || "").startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      void handleImage(String(reader.result || ""));
+    };
+    reader.onerror = () => console.error("[snapshot] file read failed");
+    reader.readAsDataURL(file);
+  };
+
+  const onPaste = (event) => {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (!item.type.startsWith("image/")) continue;
+      event.preventDefault();
+      event.stopPropagation();
+      const file = item.getAsFile();
+      if (file) readImageFile(file);
+      return;
+    }
+  };
+
+  const onPasteZoneClick = (event) => {
+    event.stopPropagation();
+    fileInput?.click();
+  };
+
+  const onFileChange = () => {
+    const file = fileInput?.files?.[0];
+    if (file) readImageFile(file);
+    if (fileInput) fileInput.value = "";
+  };
+
+  const onDragOver = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    pasteZone?.classList.add("snapshot-upload--dragover");
+  };
+
+  const onDragLeave = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget === pasteZone && !pasteZone.contains(event.relatedTarget)) {
+      pasteZone?.classList.remove("snapshot-upload--dragover");
+    }
+  };
+
+  const onDrop = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    pasteZone?.classList.remove("snapshot-upload--dragover");
+    const file = event.dataTransfer?.files?.[0];
+    if (file) readImageFile(file);
+  };
+
+  const onContinue = (event) => {
+    event.stopPropagation();
+    const current = state.links.find((item) => item.id === linkId);
+    if (current) continueOnOriginal(current);
+  };
+
+  const previewBtn = root.querySelector("#snapshotPreviewBtn");
+  const onPreviewClick = (event) => {
+    event.stopPropagation();
+    const src = getSnapshotPreview(linkId);
+    if (src) openSnapshotLightbox(src);
+  };
+
+  previewBtn?.addEventListener("click", onPreviewClick);
+
+  const onDocumentPaste = (event) => {
+    if (!root.isConnected) return;
+    if (!state.links.some((item) => item.id === linkId && item.id === state.ui.selectedLinkId)) return;
+    onPaste(event);
+  };
+
+  pasteZone?.addEventListener("click", onPasteZoneClick);
+  pasteZone?.addEventListener("paste", onPaste);
+  pasteZone?.addEventListener("dragover", onDragOver);
+  pasteZone?.addEventListener("dragleave", onDragLeave);
+  pasteZone?.addEventListener("drop", onDrop);
+  root.addEventListener("dragover", onDragOver);
+  root.addEventListener("dragleave", onDragLeave);
+  root.addEventListener("drop", onDrop);
+  document.addEventListener("paste", onDocumentPaste);
+  fileInput?.addEventListener("change", onFileChange);
+  continueBtn?.addEventListener("click", onContinue);
+
+  if (pasteZone && !previewBtn) {
+    requestAnimationFrame(() => pasteZone.focus());
+  }
+
+  return () => {
+    pasteZone?.removeEventListener("click", onPasteZoneClick);
+    pasteZone?.removeEventListener("paste", onPaste);
+    pasteZone?.removeEventListener("dragover", onDragOver);
+    pasteZone?.removeEventListener("dragleave", onDragLeave);
+    pasteZone?.removeEventListener("drop", onDrop);
+    root.removeEventListener("dragover", onDragOver);
+    root.removeEventListener("dragleave", onDragLeave);
+    root.removeEventListener("drop", onDrop);
+    document.removeEventListener("paste", onDocumentPaste);
+    fileInput?.removeEventListener("change", onFileChange);
+    continueBtn?.removeEventListener("click", onContinue);
+    previewBtn?.removeEventListener("click", onPreviewClick);
+  };
+}
+
+function normalizeReadingSnapshotFields(raw, link) {
+  const now = new Date().toISOString();
+  const base = {
+    id: `snap_${Date.now().toString(36)}`,
+    linkId: link?.id || "",
+    screenshotRef: null,
+    keyword: "",
+    savedAt: now,
+    status: "empty"
+  };
+  if (!raw || typeof raw !== "object") return base;
+
+  const keyword =
+    String(raw.keyword || "").trim() ||
+    (Array.isArray(raw.keywords) ? String(raw.keywords[0] || "").trim() : "");
+
+  let status = raw.status;
+  if (status === "completed") status = "ready";
+  if (status === "forming") status = "processing";
+  if (!["empty", "processing", "ready", "failed"].includes(status)) {
+    status = raw.screenshotRef ? "ready" : "empty";
+  }
+
+  return {
+    id: String(raw.id || base.id),
+    linkId: String(raw.linkId || link?.id || ""),
+    screenshotRef: raw.screenshotRef || null,
+    keyword: keyword.slice(0, 16),
+    savedAt: raw.savedAt || raw.updatedAt || raw.createdAt || now,
+    status
+  };
+}
+
+function getReadingSnapshot(link) {
+  if (!link || isPdfUrl(link.url)) return null;
+  link.readingSnapshot = normalizeReadingSnapshotFields(link.readingSnapshot, link);
+  return link.readingSnapshot;
+}
+
+function getSnapshotKeyword(link) {
+  return getReadingSnapshot(link)?.keyword || "";
+}
+
+function hasReadingScreenshot(link) {
+  return Boolean(getReadingSnapshot(link)?.screenshotRef);
+}
+
+function migrateLegacyToSnapshot(link) {
+  if (!link || isPdfUrl(link.url)) return;
+
+  if (link.readingMoment && typeof link.readingMoment === "object") {
+    const m = link.readingMoment;
+    link.readingSnapshot = normalizeReadingSnapshotFields(
+      {
+        id: m.id,
+        linkId: link.id,
+        screenshotRef: m.recall?.secondary?.find((c) => c.type === "visual")?.assetRef || null,
+        keyword: m.recall?.primary?.value || "",
+        savedAt: m.context?.savedAt || m.context?.momentAt,
+        status: m.status === "forming" ? "processing" : m.recall?.secondary?.some((c) => c.type === "visual") ? "ready" : "empty"
+      },
+      link
+    );
+    delete link.readingMoment;
+    return;
+  }
+
+  const snap = getReadingSnapshot(link);
+  if (snap.screenshotRef) {
+    if (!snap.keyword) snap.status = "ready";
+    return;
+  }
+
+  const trail = getWebReadTrail(link);
+  const selected = getSelectedReadingPoint(link);
+  const legacyLabel = selected?.label || trail.locationNote.trim();
+  if (legacyLabel && !snap.keyword) {
+    snap.keyword = legacyLabel.slice(0, 16);
+    snap.savedAt = trail.updatedAt || snap.savedAt;
+    if (snap.screenshotRef) snap.status = "ready";
+  }
+  link.readingSnapshot = snap;
+}
+
+async function hydrateSelectedSnapshotScreenshot() {
+  const link = state.links.find((item) => item.id === state.ui.selectedLinkId);
+  if (!link || isPdfUrl(link.url)) return;
+  const src = await hydrateSnapshotPreview(link);
+  if (src && state.ui.selectedLinkId === link.id) saveAndRender();
+  if (!src && link.readingSnapshot?.screenshotRef && state.ui.selectedLinkId === link.id) saveAndRender();
+}
+
+function touchReadingSnapshot(link) {
+  const snap = getReadingSnapshot(link);
+  if (!snap || !snap.screenshotRef) return;
+  snap.savedAt = new Date().toISOString();
 }
 
 async function idbPutLocalPdfRecord(record) {
@@ -265,8 +807,11 @@ function getSavedItemCount() {
 function getWebReadTrail(link) {
   const base = {
     locationNote: "",
+    selectedPointId: "",
+    shortNote: "",
     selectedText: "",
     progressPercent: 0,
+    checkInCount: 0,
     updatedAt: null
   };
   if (!link || typeof link !== "object") return base;
@@ -274,350 +819,1674 @@ function getWebReadTrail(link) {
   if (!t || typeof t !== "object") return base;
   return {
     locationNote: typeof t.locationNote === "string" ? t.locationNote : "",
+    selectedPointId: typeof t.selectedPointId === "string" ? t.selectedPointId : "",
+    shortNote: typeof t.shortNote === "string" ? t.shortNote : "",
     selectedText: typeof t.selectedText === "string" ? t.selectedText : "",
     progressPercent: Number.isFinite(t.progressPercent) ? Math.max(0, Math.min(100, t.progressPercent)) : 0,
+    checkInCount: Number.isFinite(t.checkInCount) ? Math.max(0, t.checkInCount) : 0,
     updatedAt: t.updatedAt || null
   };
 }
 
-function saveWebReadTrail(link, nextTrail) {
-  if (!link || !nextTrail) return;
-  link.readTrail = {
-    locationNote: String(nextTrail.locationNote || "").trim(),
-    selectedText: String(nextTrail.selectedText || "").trim(),
-    progressPercent: Math.max(0, Math.min(100, Number(nextTrail.progressPercent) || 0)),
-    updatedAt: new Date().toISOString()
-  };
-  saveAndRender();
+function getReadingPoints(link) {
+  if (!link || !Array.isArray(link.readingPoints)) return [];
+  return link.readingPoints
+    .map((p, index) => ({
+      id: String(p?.id || `rp-${index}`),
+      label: String(p?.label || "").trim()
+    }))
+    .filter((p) => p.label);
 }
 
-function getWebMemo(link) {
-  const base = {
-    whySaved: "",
-    keyPoints: "",
-    myThoughts: "",
-    nextPoint: "",
-    tagsText: "",
-    readHint: "",
-    updatedAt: null
-  };
-  if (!link || typeof link !== "object") return base;
-  const m = link.webMemo;
-  if (!m || typeof m !== "object") return base;
-  return {
-    whySaved: typeof m.whySaved === "string" ? m.whySaved : "",
-    keyPoints: typeof m.keyPoints === "string" ? m.keyPoints : "",
-    myThoughts: typeof m.myThoughts === "string" ? m.myThoughts : "",
-    nextPoint: typeof m.nextPoint === "string" ? m.nextPoint : "",
-    tagsText: typeof m.tagsText === "string" ? m.tagsText : "",
-    readHint: typeof m.readHint === "string" ? m.readHint : "",
-    updatedAt: m.updatedAt || null
-  };
+function getSelectedReadingPoint(link) {
+  const trail = getWebReadTrail(link);
+  const points = getReadingPoints(link);
+  return points.find((p) => p.id === trail.selectedPointId) || null;
 }
 
-function saveWebMemo(link, memoDraft) {
-  if (!link || !memoDraft) return;
-  link.webMemo = {
-    whySaved: String(memoDraft.whySaved || "").trim(),
-    keyPoints: String(memoDraft.keyPoints || "").trim(),
-    myThoughts: String(memoDraft.myThoughts || "").trim(),
-    nextPoint: String(memoDraft.nextPoint || "").trim(),
-    tagsText: String(memoDraft.tagsText || "").trim(),
-    readHint: String(memoDraft.readHint || "").trim(),
-    updatedAt: new Date().toISOString()
-  };
-  // Keep legacy fields for compatibility with existing list/share paths.
-  link.description = [link.webMemo.whySaved, link.webMemo.keyPoints, link.webMemo.myThoughts].filter(Boolean).join(" | ");
-  link.readTrail = {
-    locationNote: link.webMemo.readHint,
-    selectedText: link.readTrail?.selectedText || "",
-    progressPercent: link.readTrail?.progressPercent || 0,
-    updatedAt: link.webMemo.updatedAt
-  };
-  saveAndRender();
-}
-
-function getOriginalUrl(link) {
-  return link?.originalUrl || link?.url || "";
-}
-
-function getReaderState(link) {
-  const rs = link?.readerState;
-  if (!rs || typeof rs !== "object") {
-    return { scrollRatio: 0, lastParagraphId: null, updatedAt: null };
-  }
-  return {
-    scrollRatio: Math.max(0, Math.min(1, Number(rs.scrollRatio) || 0)),
-    lastParagraphId: rs.lastParagraphId || null,
-    updatedAt: rs.updatedAt || null
-  };
-}
-
-function normalizeReaderLink(link) {
-  if (!link || typeof link !== "object") return;
-  if (!link.originalUrl) link.originalUrl = link.url || "";
-  if (typeof link.content !== "string") link.content = "";
-  if (!link.contentStatus) {
-    link.contentStatus = link.content.trim() ? "ready" : "failed";
-  }
-  link.readerState = getReaderState(link);
-}
-
-function getContentStatusLabel(status) {
-  if (status === "ready") return "본문 저장됨";
-  if (status === "pending") return "본문 가져오는 중...";
-  return "본문 추출 실패, 직접 붙여넣기 필요";
-}
-
-function readerPageUrl(linkId, restart) {
-  const qs = restart ? "?restart=1" : "";
-  return `/#read/${encodeURIComponent(linkId)}${qs}`;
-}
-
-let activeReaderLinkId = null;
-let readerSaveTimer = null;
-
-function persistStateOnly() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  if (auth.isLoggedIn) {
-    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(state));
-  }
-}
-
-function getReaderContentHtml(link) {
-  if (link.contentStatus === "ready" && String(link.content || "").trim()) {
-    return link.content;
-  }
-  const fallback = String(link.description || "").trim() || getWebMemo(link).keyPoints.trim();
-  if (fallback.length >= 40 && window.KeepPointContentExtract?.plainTextToReaderHtml) {
-    return window.KeepPointContentExtract.plainTextToReaderHtml(fallback);
+function getMemoryPoint(link) {
+  const selected = getSelectedReadingPoint(link);
+  if (selected) return selected.label;
+  const locationNote = getWebReadTrail(link).locationNote.trim();
+  if (locationNote) return locationNote;
+  if (hasReadingScreenshot(link)) {
+    const keyword = getSnapshotKeyword(link);
+    if (keyword) return keyword;
   }
   return "";
 }
 
-function getReaderScrollRatio(container) {
-  const max = Math.max(1, container.scrollHeight - container.clientHeight);
-  return Math.max(0, Math.min(1, container.scrollTop / max));
+function getBookmarkLocation(link) {
+  return getMemoryPoint(link);
 }
 
-function findReaderParagraphId(container) {
-  const blocks = container.querySelectorAll('[id^="kp-p-"]');
-  let lastId = null;
-  const marker = container.clientHeight * 0.35;
-  for (const el of blocks) {
-    if (el.offsetTop - container.scrollTop <= marker) lastId = el.id;
-  }
-  return lastId;
+function progressFromPointIndex(index, total) {
+  if (index < 0 || total <= 0) return 0;
+  if (total === 1) return 100;
+  return Math.round(((index + 1) / total) * 100);
 }
 
-function saveReaderScrollPosition() {
-  const link = state.links.find((l) => l.id === activeReaderLinkId);
-  const scrollEl = document.getElementById("readerScroll");
-  if (!link || !scrollEl) return;
-  link.readerState = {
-    scrollRatio: getReaderScrollRatio(scrollEl),
-    lastParagraphId: findReaderParagraphId(scrollEl),
+function selectReadingPoint(link, pointId) {
+  if (!link || isPdfUrl(link.url)) return;
+  const points = getReadingPoints(link);
+  const index = points.findIndex((p) => p.id === pointId);
+  if (index < 0) return;
+  const point = points[index];
+  const progress = progressFromPointIndex(index, points.length);
+  const trail = getWebReadTrail(link);
+  link.readTrail = {
+    ...trail,
+    selectedPointId: point.id,
+    locationNote: point.label,
+    progressPercent: progress,
+    checkInCount: (trail.checkInCount || 0) + 1,
     updatedAt: new Date().toISOString()
   };
+  link.readingStatus = progress >= 100 ? "completed" : "reading";
   link.lastVisitedAt = new Date().toISOString();
-  persistStateOnly();
-  const progressEl = document.getElementById("readerProgress");
-  if (progressEl) progressEl.textContent = `${Math.round(link.readerState.scrollRatio * 100)}%`;
-  const statusEl = document.getElementById("readerSaveStatus");
-  if (statusEl) statusEl.textContent = "저장됨";
+  delete link.webMemo;
+  runtimeSaveStatus[link.id] = "저장됨";
+  saveAndRender();
 }
 
-function scheduleReaderSave() {
-  const statusEl = document.getElementById("readerSaveStatus");
-  if (statusEl) statusEl.textContent = "저장 중...";
-  clearTimeout(readerSaveTimer);
-  readerSaveTimer = setTimeout(saveReaderScrollPosition, 350);
+function saveManualReadingPoint(link, text) {
+  if (!link || isPdfUrl(link.url)) return false;
+  const label = String(text || "").trim().slice(0, 20);
+  if (!label) return false;
+  const trail = getWebReadTrail(link);
+  const progress = estimateProgressOnCheckIn(trail);
+  link.readTrail = {
+    ...trail,
+    selectedPointId: "",
+    locationNote: label,
+    progressPercent: progress,
+    checkInCount: (trail.checkInCount || 0) + 1,
+    updatedAt: new Date().toISOString()
+  };
+  link.readingStatus = progress >= 100 ? "completed" : "reading";
+  link.lastVisitedAt = new Date().toISOString();
+  delete link.webMemo;
+  runtimeSaveStatus[link.id] = "저장됨";
+  saveAndRender();
+  return true;
 }
 
-function restoreReaderScrollPosition(link, restart) {
-  const scrollEl = document.getElementById("readerScroll");
-  if (!scrollEl || restart) return;
-  const rs = getReaderState(link);
-  if (rs.lastParagraphId) {
-    const el = document.getElementById(rs.lastParagraphId);
-    if (el) {
-      el.scrollIntoView({ block: "start" });
-      el.classList.add("reader-current");
-      return;
+function getReadingSessions(link) {
+  if (!link || !Array.isArray(link.readingSessions)) return [];
+  return link.readingSessions
+    .filter((s) => s && typeof s === "object" && s.openedAt)
+    .map((s) => ({
+      id: String(s.id || ""),
+      openedAt: s.openedAt,
+      returnedAt: s.returnedAt || null,
+      durationMs: Number.isFinite(s.durationMs) ? Math.max(0, s.durationMs) : null,
+      closeReason: s.closeReason || null
+    }));
+}
+
+function normalizeReadingSessions(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  if (!Array.isArray(link.readingSessions)) link.readingSessions = [];
+  link.readingSessions = getReadingSessions(link);
+  if (!Number.isFinite(link.openCount)) {
+    link.openCount = link.readingSessions.length || getWebReadTrail(link).checkInCount || 0;
+  }
+  if (!link.savedAt) link.savedAt = link.lastVisitedAt || new Date().toISOString();
+}
+
+function getCategoryName(categoryId) {
+  return state.categories.find((c) => c.id === categoryId)?.name || "";
+}
+
+const SESSION_DURATION_CAP_MS = 45 * 60 * 1000;
+const SESSION_HISTORY_LIMIT = 20;
+const HUNT_WINDOW_MS = 48 * 60 * 60 * 1000;
+const SHORT_OPEN_MS = 90 * 1000;
+
+function formatVisitWhen(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const diff = Date.now() - date.getTime();
+  const day = Math.floor(diff / (1000 * 60 * 60 * 24));
+  if (day <= 0) {
+    return `오늘 ${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+  if (day === 1) return "어제";
+  if (day < 7) return `${day}일 전`;
+  return relativeTime(iso);
+}
+
+function getMetaDescription(link) {
+  return String(link?.description || "").trim();
+}
+
+function getLinkActivityAt(link) {
+  const sessions = getReadingSessions(link);
+  const lastSession = sessions[sessions.length - 1];
+  return (
+    lastSession?.returnedAt ||
+    lastSession?.openedAt ||
+    link.lastVisitedAt ||
+    link.savedAt ||
+    ""
+  );
+}
+
+function getLinkActivityMs(link) {
+  const iso = getLinkActivityAt(link);
+  const ms = iso ? new Date(iso).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function getLinkOpenDuration(link) {
+  return getReadingSessions(link)
+    .filter((s) => s.durationMs > 0)
+    .reduce((sum, s) => sum + s.durationMs, 0);
+}
+
+function tokenizeForHunt(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+}
+
+function scoreHuntOverlap(a, b) {
+  const aTokens = new Set([
+    ...tokenizeForHunt(a.title),
+    ...tokenizeForHunt(getMetaDescription(a)).slice(0, 12)
+  ]);
+  const bTokens = new Set([
+    ...tokenizeForHunt(b.title),
+    ...tokenizeForHunt(getMetaDescription(b)).slice(0, 12)
+  ]);
+  if (!aTokens.size || !bTokens.size) return 0;
+  let hit = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) hit += 1;
+  }
+  return hit / Math.min(aTokens.size, bTokens.size);
+}
+
+function linksBelongInSameHunt(a, b) {
+  if (!a || !b || a.categoryId !== b.categoryId) return false;
+  const aMs = getLinkActivityMs(a);
+  const bMs = getLinkActivityMs(b);
+  const withinWindow = aMs && bMs && Math.abs(aMs - bMs) <= HUNT_WINDOW_MS;
+  return withinWindow || scoreHuntOverlap(a, b) >= 0.18;
+}
+
+function buildHuntFocus(links, preferredLink) {
+  const ordered = [preferredLink, ...links].filter(Boolean);
+  for (const link of ordered) {
+    const desc = getMetaDescription(link);
+    if (desc) {
+      return {
+        text: shortText(desc, 88),
+        source: "description",
+        linkId: link.id
+      };
     }
   }
-  if (rs.scrollRatio > 0) {
-    const max = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-    scrollEl.scrollTop = max * rs.scrollRatio;
+  for (const link of ordered) {
+    const title = String(link?.title || "").trim();
+    if (title) {
+      return {
+        text: shortText(title, 60),
+        source: "title",
+        linkId: link.id
+      };
+    }
   }
+  return { text: "저장된 탐색", source: "fallback", linkId: preferredLink?.id || links[0]?.id || "" };
 }
 
-function closeReaderOverlay(fromPopstate = false) {
-  saveReaderScrollPosition();
-  activeReaderLinkId = null;
-  const overlay = document.getElementById("readerOverlay");
-  if (overlay) {
-    overlay.classList.add("hidden");
-    overlay.setAttribute("aria-hidden", "true");
+function buildHuntLabel(links, categoryId) {
+  const categoryName = getCategoryName(categoryId);
+  const tokenCounts = new Map();
+  for (const link of links) {
+    for (const token of tokenizeForHunt(link.title)) {
+      tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+    }
   }
-  document.body.style.overflow = "";
-  if (!fromPopstate) {
-    const base = window.location.pathname + window.location.search;
-    history.replaceState(null, "", base);
-  }
-  render();
+  const shared = [...tokenCounts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+    .map(([token]) => token)
+    .slice(0, 2);
+
+  if (categoryName && shared.length) return `${categoryName} · ${shared.join(" ")}`;
+  if (categoryName) return `${categoryName} 탐색`;
+  if (shared.length) return shared.join(" ");
+  const focus = buildHuntFocus(links, links[0]);
+  return shortText(focus.text, 28);
 }
 
-function showReaderOverlay(link, restart) {
-  const overlay = document.getElementById("readerOverlay");
-  const scrollEl = document.getElementById("readerScroll");
-  const articleEl = document.getElementById("readerArticle");
-  const emptyEl = document.getElementById("readerEmpty");
-  const titleEl = document.getElementById("readerTitle");
-  const originalEl = document.getElementById("readerOriginalLink");
-  const progressEl = document.getElementById("readerProgress");
-  const originalUrl = getOriginalUrl(link);
-
-  if (!overlay || !scrollEl || !articleEl) {
-    window.location.href = `/reader.html?id=${encodeURIComponent(link.id)}`;
-    return;
+function buildHuntTrail(links) {
+  const byId = new Map(links.map((link) => [link.id, link]));
+  const events = [];
+  for (const link of links) {
+    const sessions = getReadingSessions(link);
+    if (!sessions.length) continue;
+    for (const session of sessions) {
+      events.push({
+        linkId: link.id,
+        openedAt: session.openedAt,
+        durationMs: session.durationMs
+      });
+    }
   }
-
-  activeReaderLinkId = link.id;
-  if (titleEl) titleEl.textContent = link.title || "Reader";
-  if (originalEl) {
-    originalEl.href = originalUrl || "#";
-    originalEl.textContent = originalUrl || "원본";
+  events.sort((a, b) => new Date(a.openedAt) - new Date(b.openedAt));
+  const trail = [];
+  for (const event of events) {
+    const prev = trail[trail.length - 1];
+    if (prev && prev.linkId === event.linkId) {
+      prev.openedAt = event.openedAt;
+      if (event.durationMs != null) prev.durationMs = event.durationMs;
+      continue;
+    }
+    trail.push({ ...event });
   }
+  return trail.filter((item) => byId.has(item.linkId)).slice(-8);
+}
 
-  const html = getReaderContentHtml(link);
-  if (!html) {
-    scrollEl.classList.add("hidden");
-    emptyEl?.classList.remove("hidden");
-    const pasteInput = document.getElementById("readerPasteInput");
-    if (pasteInput) pasteInput.value = "";
+function pickHuntNextLinkId(links, lastLinkId) {
+  const neverOpened = links.filter((link) => (link.openCount || getReadingSessions(link).length || 0) === 0);
+  if (neverOpened.length) {
+    neverOpened.sort((a, b) => new Date(b.savedAt || 0) - new Date(a.savedAt || 0));
+    return neverOpened[0].id;
+  }
+  const shortOpened = links
+    .filter((link) => link.id !== lastLinkId)
+    .map((link) => ({ link, duration: getLinkOpenDuration(link), opens: link.openCount || 0 }))
+    .filter((row) => row.opens > 0 && row.duration < SHORT_OPEN_MS)
+    .sort((a, b) => a.duration - b.duration);
+  if (shortOpened.length) return shortOpened[0].link.id;
+  const others = links
+    .filter((link) => link.id !== lastLinkId)
+    .sort((a, b) => getLinkActivityMs(b) - getLinkActivityMs(a));
+  return others[0]?.id || null;
+}
+
+function stableHuntId(linkIds) {
+  const key = [...linkIds].sort().join("|");
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return `hunt_${hash.toString(36)}`;
+}
+
+function createHuntFromLinks(links, previousHunt = null) {
+  const members = [...links].sort((a, b) => getLinkActivityMs(b) - getLinkActivityMs(a));
+  const trail = buildHuntTrail(members);
+  const lastLinkId = trail[trail.length - 1]?.linkId || members[0]?.id || null;
+  const lastLink = members.find((link) => link.id === lastLinkId) || members[0];
+  const focus = buildHuntFocus(members, lastLink);
+  const lastActiveAt =
+    trail[trail.length - 1]?.openedAt || getLinkActivityAt(lastLink) || new Date().toISOString();
+  const linkIds = members.map((link) => link.id);
+
+  return {
+    id: previousHunt?.id || stableHuntId(linkIds),
+    categoryId: members[0]?.categoryId || "",
+    linkIds,
+    trail,
+    lastLinkId,
+    nextLinkId: pickHuntNextLinkId(members, lastLinkId),
+    label: buildHuntLabel(members, members[0]?.categoryId),
+    focusQuote: focus.text,
+    focusSource: focus.source,
+    lastActiveAt,
+    status: previousHunt?.status || "active"
+  };
+}
+
+function clusterWebLinksIntoHunts(webLinks) {
+  const remaining = [...webLinks].sort((a, b) => getLinkActivityMs(b) - getLinkActivityMs(a));
+  const clusters = [];
+
+  while (remaining.length) {
+    const seed = remaining.shift();
+    const cluster = [seed];
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (let i = remaining.length - 1; i >= 0; i -= 1) {
+        const candidate = remaining[i];
+        if (cluster.some((member) => linksBelongInSameHunt(member, candidate))) {
+          cluster.push(candidate);
+          remaining.splice(i, 1);
+          grew = true;
+        }
+      }
+    }
+    clusters.push(cluster);
+  }
+  return clusters;
+}
+
+function findPreviousHuntForCluster(linkIds, previousHunts) {
+  const set = new Set(linkIds);
+  let best = null;
+  let bestScore = 0;
+  for (const hunt of previousHunts || []) {
+    const overlap = (hunt.linkIds || []).filter((id) => set.has(id)).length;
+    if (overlap > bestScore) {
+      best = hunt;
+      bestScore = overlap;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+function rebuildHunts() {
+  const previousHunts = Array.isArray(state.hunts) ? state.hunts : [];
+  const webLinks = (state.links || []).filter((link) => link && !isPdfUrl(link.url));
+  const clusters = clusterWebLinksIntoHunts(webLinks);
+  const hunts = clusters.map((cluster) => {
+    const linkIds = cluster.map((link) => link.id);
+    const previous = findPreviousHuntForCluster(linkIds, previousHunts);
+    return createHuntFromLinks(cluster, previous);
+  });
+  hunts.sort((a, b) => new Date(b.lastActiveAt || 0) - new Date(a.lastActiveAt || 0));
+  state.hunts = hunts;
+
+  if (!state.ui || typeof state.ui !== "object") state.ui = {};
+  if (state.ui.activeHuntId && !hunts.some((hunt) => hunt.id === state.ui.activeHuntId)) {
+    state.ui.activeHuntId = hunts[0]?.id || null;
+  }
+  if (!state.ui.activeHuntId) state.ui.activeHuntId = hunts[0]?.id || null;
+  return hunts;
+}
+
+function getHuntById(huntId) {
+  return (state.hunts || []).find((hunt) => hunt.id === huntId) || null;
+}
+
+function getActiveHunt() {
+  return getHuntById(state.ui?.activeHuntId) || (state.hunts || [])[0] || null;
+}
+
+function getHuntForLink(link) {
+  if (!link || isPdfUrl(link.url)) return null;
+  return (state.hunts || []).find((hunt) => hunt.linkIds.includes(link.id)) || null;
+}
+
+function getHuntLinks(hunt) {
+  if (!hunt) return [];
+  const map = new Map((state.links || []).map((link) => [link.id, link]));
+  return hunt.linkIds.map((id) => map.get(id)).filter(Boolean);
+}
+
+function setActiveHunt(huntId) {
+  if (!state.ui) state.ui = {};
+  state.ui.activeHuntId = huntId || null;
+}
+
+function touchHuntForLink(link) {
+  if (!link || isPdfUrl(link.url)) return null;
+  if (!Array.isArray(state.hunts) || !state.hunts.length) rebuildHunts();
+  let hunt = getHuntForLink(link);
+  if (!hunt) {
+    rebuildHunts();
+    hunt = getHuntForLink(link);
+  }
+  if (!hunt) return null;
+  setActiveHunt(hunt.id);
+  hunt.lastLinkId = link.id;
+  hunt.lastActiveAt = new Date().toISOString();
+  const trail = Array.isArray(hunt.trail) ? hunt.trail : [];
+  const last = trail[trail.length - 1];
+  if (!last || last.linkId !== link.id) {
+    trail.push({
+      linkId: link.id,
+      openedAt: hunt.lastActiveAt,
+      durationMs: null
+    });
   } else {
-    articleEl.innerHTML = html;
-    scrollEl.classList.remove("hidden");
-    emptyEl?.classList.add("hidden");
-    requestAnimationFrame(() => restoreReaderScrollPosition(link, restart));
+    last.openedAt = hunt.lastActiveAt;
   }
+  hunt.trail = trail.slice(-8);
+  const members = getHuntLinks(hunt);
+  hunt.nextLinkId = pickHuntNextLinkId(members, hunt.lastLinkId);
+  const focus = buildHuntFocus(members, link);
+  hunt.focusQuote = focus.text;
+  hunt.focusSource = focus.source;
+  hunt.label = buildHuntLabel(members, hunt.categoryId);
+  return hunt;
+}
 
-  if (progressEl) {
-    const ratio = restart ? 0 : getReaderState(link).scrollRatio;
-    progressEl.textContent = `${Math.round(ratio * 100)}%`;
+const MEMORY_POINT_STOP = new Set([
+  "the",
+  "and",
+  "for",
+  "that",
+  "this",
+  "with",
+  "from",
+  "are",
+  "was",
+  "were",
+  "have",
+  "has",
+  "had",
+  "not",
+  "but",
+  "you",
+  "your",
+  "home",
+  "page",
+  "blog",
+  "news",
+  "index",
+  "lets",
+  "until",
+  "finished",
+  "loading",
+  "display",
+  "fallback",
+  "children",
+  "including",
+  "exterior",
+  "palette",
+  "및",
+  "에서",
+  "으로",
+  "하는",
+  "했다",
+  "한다",
+  "있는",
+  "없는",
+  "대한",
+  "위한",
+  "통해",
+  "관련",
+  "안내",
+  "자료",
+  "문서",
+  "페이지",
+  "내용",
+  "소개",
+  "다룹니다",
+  "추진한",
+  "정리한",
+  "설명한",
+  "된",
+  "할",
+  "한",
+  "등"
+]);
+
+const MEMORY_PATH_STOP = new Set([
+  "www",
+  "com",
+  "net",
+  "org",
+  "co",
+  "kr",
+  "en",
+  "ko",
+  "blog",
+  "post",
+  "posts",
+  "article",
+  "articles",
+  "news",
+  "page",
+  "pages",
+  "index",
+  "view",
+  "detail",
+  "docs",
+  "doc",
+  "wiki",
+  "tag",
+  "tags",
+  "category",
+  "categories",
+  "search",
+  "id",
+  "amp"
+]);
+
+function normalizeMemoryTag(value) {
+  let text = String(value || "")
+    .trim()
+    .replace(/^#+/, "")
+    .replace(/\s+/g, "")
+    .replace(/[^\p{L}\p{N}_-]/gu, "");
+  text = text.replace(/(의|을|를|이|가|은|는|과|와|도|로|으로|에서|부터|까지|만|께|에게)$/u, "");
+  if (!text) return "";
+  if (text.length > 16) text = text.slice(0, 16);
+  if (text.length < 2) return "";
+  if (/^\d+$/.test(text)) return "";
+  if (MEMORY_POINT_STOP.has(text.toLowerCase())) return "";
+  return text;
+}
+
+function formatMemoryTag(tag) {
+  const normalized = normalizeMemoryTag(tag);
+  return normalized ? `#${normalized}` : "";
+}
+
+function uniqueMemoryTags(tags, max = 6) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of tags) {
+    const tag = normalizeMemoryTag(raw);
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+    if (out.length >= max) break;
   }
+  return out;
+}
 
-  overlay.classList.remove("hidden");
-  overlay.setAttribute("aria-hidden", "false");
-  document.body.style.overflow = "hidden";
+function tokenizeMemoryText(text) {
+  return String(text || "")
+    .replace(/[^\p{L}\p{N}\s_-]/gu, " ")
+    .split(/[\s_/|-]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
 
-  if (!scrollEl.dataset.bound) {
-    scrollEl.dataset.bound = "1";
-    scrollEl.addEventListener("scroll", scheduleReaderSave, { passive: true });
+function memoryPathTokens(url) {
+  try {
+    const u = new URL(url);
+    return u.pathname
+      .split("/")
+      .map((part) => {
+        try {
+          return decodeURIComponent(part);
+        } catch {
+          return part;
+        }
+      })
+      .flatMap((part) => tokenizeMemoryText(part.replace(/[-_]+/g, " ")))
+      .filter((part) => part && !MEMORY_PATH_STOP.has(part.toLowerCase()));
+  } catch {
+    return [];
   }
 }
 
-function openReader(linkId, restart = false) {
-  const link = state.links.find((l) => l.id === linkId);
-  if (!link) {
-    alert("링크를 찾을 수 없습니다.");
+/**
+ * Recommend objective memory-point tags from available meta only.
+ * Never invents document body content or user intent.
+ */
+function generateMemoryPoints({
+  url = "",
+  title = "",
+  ogTitle = "",
+  description = "",
+  sourceName = ""
+} = {}) {
+  const scored = new Map();
+  const bump = (token, weight) => {
+    const tag = normalizeMemoryTag(token);
+    if (!tag) return;
+    const key = tag.toLowerCase();
+    const prev = scored.get(key);
+    if (!prev || weight > prev.weight || (weight === prev.weight && tag.length > prev.tag.length)) {
+      scored.set(key, { tag, weight });
+    }
+  };
+
+  for (const token of tokenizeMemoryText(ogTitle || title)) bump(token, 5);
+  for (const token of tokenizeMemoryText(title)) bump(token, 4);
+  for (const token of tokenizeMemoryText(description).slice(0, 24)) bump(token, 3);
+  for (const token of memoryPathTokens(url)) bump(token, 2);
+  if (sourceName) bump(String(sourceName).replace(/\./g, ""), 1);
+
+  const ranked = [...scored.values()]
+    .sort((a, b) => b.weight - a.weight || b.tag.length - a.tag.length)
+    .map((row) => row.tag);
+
+  let points = uniqueMemoryTags(ranked, 6);
+  if (points.length < 3) {
+    points = uniqueMemoryTags(
+      [...points, ...tokenizeMemoryText(ogTitle || title), ...tokenizeMemoryText(description), ...memoryPathTokens(url)],
+      6
+    );
+  }
+  return points;
+}
+
+function normalizeMemoryPoints(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  const raw = link.memoryPoints && typeof link.memoryPoints === "object" ? link.memoryPoints : {};
+  // Migrate legacy selected/suggested model → auto-applied items.
+  let suggested = uniqueMemoryTags(raw.suggested || [], 8);
+  let custom = uniqueMemoryTags(raw.custom || [], 12);
+  let removed = uniqueMemoryTags(raw.removed || [], 16);
+  if (!suggested.length && Array.isArray(raw.selected) && raw.selected.length) {
+    suggested = uniqueMemoryTags(raw.selected, 8);
+  }
+  link.memoryPoints = {
+    suggested,
+    custom,
+    removed,
+    status: ["pending", "ready"].includes(raw.status) ? raw.status : suggested.length ? "ready" : "pending",
+    source: raw.source || "",
+    generatedAt: raw.generatedAt || null
+  };
+  delete link.readingAnchor;
+}
+
+function getActiveAiMemoryPoints(link) {
+  normalizeMemoryPoints(link);
+  const removed = new Set(link.memoryPoints.removed.map((t) => t.toLowerCase()));
+  return link.memoryPoints.suggested.filter((tag) => !removed.has(tag.toLowerCase()));
+}
+
+function getFinalMemoryPoints(link) {
+  normalizeMemoryPoints(link);
+  return uniqueMemoryTags([...getActiveAiMemoryPoints(link), ...link.memoryPoints.custom], 16);
+}
+
+function getDisplayMemoryPoints(link) {
+  return getFinalMemoryPoints(link);
+}
+
+function getContextHint(link) {
+  const checkpoint = getCheckpointSnippet(link);
+  if (checkpoint) return shortText(checkpoint, 42);
+  const points = getDisplayMemoryPoints(link);
+  if (points.length) return points.slice(0, 3).map((t) => `#${t}`).join(" ");
+  return "기억 포인트 준비 중";
+}
+
+function buildShareHuntText(link) {
+  const lines = [`제목: ${link.title}`, `원본: ${getOriginalUrl(link)}`];
+  const points = getFinalMemoryPoints(link);
+  if (points.length) lines.push(`기억 포인트: ${points.map((t) => `#${t}`).join(" ")}`);
+  return lines.join("\n");
+}
+
+function applySuggestedMemoryPoints(link, points, source = "heuristic") {
+  normalizeMemoryPoints(link);
+  const suggested = uniqueMemoryTags(points, 8);
+  if (!suggested.length) return link.memoryPoints;
+  // Keep user removals; new AI tags are auto-applied unless previously removed.
+  link.memoryPoints = {
+    ...link.memoryPoints,
+    suggested,
+    status: "ready",
+    source,
+    generatedAt: new Date().toISOString()
+  };
+  return link.memoryPoints;
+}
+
+function removeMemoryPoint(link, tag) {
+  normalizeMemoryPoints(link);
+  const normalized = normalizeMemoryTag(tag);
+  if (!normalized) return;
+  const key = normalized.toLowerCase();
+  const inCustom = link.memoryPoints.custom.some((t) => t.toLowerCase() === key);
+  if (inCustom) {
+    link.memoryPoints.custom = link.memoryPoints.custom.filter((t) => t.toLowerCase() !== key);
     return;
   }
-  link.lastVisitedAt = new Date().toISOString();
-  persistStateOnly();
-  showReaderOverlay(link, restart);
-  history.pushState({ reader: linkId }, "", readerPageUrl(linkId, restart));
-}
-
-function bindReaderOverlayEvents() {
-  document.getElementById("readerBackBtn")?.addEventListener("click", closeReaderOverlay);
-  document.getElementById("readerOpenOriginalBtn")?.addEventListener("click", () => {
-    const link = state.links.find((l) => l.id === activeReaderLinkId);
-    if (link) openOriginalUrl(link);
-  });
-  document.getElementById("readerSavePasteBtn")?.addEventListener("click", () => {
-    const link = state.links.find((l) => l.id === activeReaderLinkId);
-    const text = document.getElementById("readerPasteInput")?.value || "";
-    if (!link) return;
-    if (saveManualReaderContent(link, text)) {
-      showReaderOverlay(link, true);
-    }
-  });
-  window.addEventListener("popstate", () => {
-    if (activeReaderLinkId && !location.hash.startsWith("#read/")) {
-      closeReaderOverlay(true);
-    }
-  });
-}
-
-function openReaderFromHash() {
-  const match = location.hash.match(/^#read\/([^/?#]+)/);
-  if (!match) return;
-  const linkId = decodeURIComponent(match[1]);
-  const restart = location.search.includes("restart=1");
-  const link = state.links.find((l) => l.id === linkId);
-  if (link) {
-    activeReaderLinkId = linkId;
-    showReaderOverlay(link, restart);
+  if (link.memoryPoints.suggested.some((t) => t.toLowerCase() === key)) {
+    link.memoryPoints.removed = uniqueMemoryTags([...link.memoryPoints.removed, normalized], 16);
   }
 }
 
-function openOriginalUrl(link) {
+function addCustomMemoryPoint(link, raw) {
+  normalizeMemoryPoints(link);
+  const chunks = String(raw || "")
+    .split(/[\s,，]+/)
+    .map((part) => normalizeMemoryTag(part))
+    .filter(Boolean);
+  if (!chunks.length) return false;
+  // If user re-adds a removed AI tag, restore it instead of duplicating as custom.
+  const restored = [];
+  const fresh = [];
+  for (const tag of chunks) {
+    const key = tag.toLowerCase();
+    if (link.memoryPoints.suggested.some((t) => t.toLowerCase() === key)) {
+      restored.push(tag);
+    } else {
+      fresh.push(tag);
+    }
+  }
+  if (restored.length) {
+    const restoreKeys = new Set(restored.map((t) => t.toLowerCase()));
+    link.memoryPoints.removed = link.memoryPoints.removed.filter((t) => !restoreKeys.has(t.toLowerCase()));
+  }
+  link.memoryPoints.custom = uniqueMemoryTags([...link.memoryPoints.custom, ...fresh], 12);
+  return true;
+}
+
+async function fetchMemoryPointsFromApi(link) {
+  try {
+    const res = await fetch("/api/memory-points", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: getOriginalUrl(link),
+        title: link.title || "",
+        ogTitle: link.title || "",
+        description: link.description || "",
+        sourceName: link.sourceName || ""
+      })
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const points = data?.points || data?.tags || [];
+    return Array.isArray(points) && points.length
+      ? { points, source: data.source || "ai" }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureMemoryPoints(link, { force = false } = {}) {
+  if (!link || isPdfUrl(link.url)) return;
+  normalizeMemoryPoints(link);
+
+  if (!force && link.memoryPoints.status === "ready" && link.memoryPoints.suggested.length) {
+    return link.memoryPoints;
+  }
+
+  const local = generateMemoryPoints({
+    url: getOriginalUrl(link),
+    title: link.title || "",
+    ogTitle: link.title || "",
+    description: link.description || "",
+    sourceName: link.sourceName || ""
+  });
+  applySuggestedMemoryPoints(link, local, "heuristic");
+
+  const remote = await fetchMemoryPointsFromApi(link);
+  if (remote?.points?.length) {
+    applySuggestedMemoryPoints(link, remote.points, remote.source || "ai");
+  }
+  return link.memoryPoints;
+}
+
+function renderMemoryPointsPanel(link) {
+  normalizeMemoryPoints(link);
+  normalizeCheckpointFields(link);
+  const isReading = Boolean(runtimeActiveSession && runtimeActiveSession.linkId === link.id);
+  const aiPoints = getActiveAiMemoryPoints(link);
+  const custom = link.memoryPoints.custom;
+  const finals = getFinalMemoryPoints(link);
+  const checkpointText = getCheckpointSnippet(link);
+  const hasCheckpoint = Boolean(link.checkpointUrl);
+  const ogImage = String(link.ogImage || "").trim();
+  const hero = ogImage
+    ? `<div class="context-hero"><img src="${escapeAttr(ogImage)}" alt="" class="context-og-image" loading="lazy" /></div>`
+    : "";
+
+  const pointChips = finals.length
+    ? finals
+        .map((tag) => {
+          const isCustom = custom.some((t) => t.toLowerCase() === tag.toLowerCase());
+          return `<button type="button" class="memory-chip active ${isCustom ? "custom" : ""}" data-remove-point="${escapeAttr(tag)}" title="삭제">#${escapeHtml(tag)} <span aria-hidden="true">×</span></button>`;
+        })
+        .join("")
+    : link.memoryPoints.status === "pending"
+      ? `<p class="memory-pending">기억 포인트를 만드는 중…</p>`
+      : `<p class="memory-pending">아직 기억 포인트가 없습니다. 아래에서 추가할 수 있어요.</p>`;
+
+  const checkpointBlock = `
+    <section class="checkpoint-card" aria-label="읽던 위치">
+      <p class="memory-kicker">최근 읽던 문장</p>
+      ${
+        checkpointText
+          ? `<p class="checkpoint-quote">「${escapeHtml(shortText(checkpointText, 120))}」</p>`
+          : `<p class="checkpoint-empty">아직 저장된 위치가 없습니다. 원문에서 문장을 선택한 뒤 「선택한 텍스트로 링크 복사」한 URL을 업데이트하세요.</p>`
+      }
+      <p class="checkpoint-updated">마지막 업데이트 · ${escapeHtml(formatCheckpointUpdatedAt(link))}</p>
+      <div class="checkpoint-actions">
+        <button type="button" class="btn checkpoint-continue-btn" id="continueCheckpointBtn">${
+          isReading ? "계속 읽기 (다시 열기)" : "계속 읽기"
+        }</button>
+        <button type="button" class="btn ghost" id="openFromStartBtn">처음부터 보기</button>
+        <button type="button" class="btn ghost" id="updateCheckpointBtn">새 위치 업데이트</button>
+      </div>
+      <div class="checkpoint-update-row" id="checkpointUpdateRow" hidden>
+        <input type="url" id="checkpointUpdateInput" class="checkpoint-update-input" placeholder="선택한 텍스트로 링크 복사한 URL 붙여넣기" aria-label="새 체크포인트 URL" />
+        <div class="checkpoint-update-actions">
+          <button type="button" class="btn sm" id="checkpointUpdateSave">저장</button>
+          <button type="button" class="btn ghost sm" id="checkpointUpdateCancel">취소</button>
+        </div>
+        <p class="checkpoint-update-hint">같은 페이지의 Text Fragment URL만 이 카드의 위치로 갱신됩니다.</p>
+      </div>
+      ${
+        hasCheckpoint && link.checkpointHistory?.length
+          ? `<details class="checkpoint-history">
+              <summary>이전 위치 ${link.checkpointHistory.length}개</summary>
+              <ul class="checkpoint-history-list">
+                ${link.checkpointHistory
+                  .slice()
+                  .reverse()
+                  .slice(0, 8)
+                  .map(
+                    (item) =>
+                      `<li><button type="button" class="checkpoint-history-btn" data-history-url="${escapeAttr(item.url)}">${escapeHtml(shortText(item.text || "이전 위치", 64))}</button></li>`
+                  )
+                  .join("")}
+              </ul>
+            </details>`
+          : ""
+      }
+    </section>`;
+
+  return `
+    <div class="web-link-panel memory-panel">
+      ${hero}
+      <header class="context-header">
+        <p class="context-meta">${escapeHtml(getLinkSourceName(link))}</p>
+        <h2 class="context-title">${escapeHtml(link.title)}</h2>
+      </header>
+      ${checkpointBlock}
+      <section class="memory-points-card ${isReading ? "is-reading" : ""}" aria-label="기억 포인트">
+        <p class="memory-kicker">📍 기억 포인트</p>
+        <p class="memory-subkicker">${aiPoints.length ? "AI 추천 · 그대로 두거나 삭제·추가하세요" : "기억 단서"}</p>
+        <div class="memory-chip-row" id="memoryPointRow">
+          ${pointChips}
+        </div>
+        <button type="button" class="btn ghost sm memory-add-toggle" id="memoryAddToggle">+ 기억 포인트 추가</button>
+        <div class="memory-add-row" id="memoryAddRow" hidden>
+          <input type="text" id="memoryAddInput" class="memory-add-input" maxlength="40" placeholder="#발표 #중간고사" aria-label="기억 포인트 추가" />
+          <div class="memory-add-actions">
+            <button type="button" class="btn sm" id="memoryAddSave">추가</button>
+            <button type="button" class="btn ghost sm" id="memoryAddCancel">취소</button>
+          </div>
+        </div>
+        ${
+          isReading
+            ? `<p class="memory-reading-note">원문 탭에서 읽는 중 · 돌아오면 이 카드의 최근 위치로 이어갑니다.</p>`
+            : ""
+        }
+      </section>
+    </div>`;
+}
+
+function renderWebLinkDetailPanel(link) {
+  return renderMemoryPointsPanel(link);
+}
+
+function openContinueReading(link) {
+  const url = normalizeUrl(getContinueUrl(link));
+  if (!url) {
+    alert("원본 URL이 없습니다.");
+    return;
+  }
+  startReadingSession(link);
+  window.open(url, "_blank", "noopener,noreferrer");
+  saveAndRender();
+}
+
+function openFromBeginning(link) {
   const url = normalizeUrl(getOriginalUrl(link));
   if (!url) {
     alert("원본 URL이 없습니다.");
     return;
   }
+  startReadingSession(link);
   window.open(url, "_blank", "noopener,noreferrer");
+  saveAndRender();
 }
 
-async function extractAndApplyToLink(link) {
-  const url = getOriginalUrl(link);
-  if (!url || isPdfUrl(url)) return;
-  link.contentStatus = "pending";
-  saveAndRender();
-  const result = await window.KeepPointContentExtract.extractFromUrl(url);
-  if (result.title) link.title = result.title;
-  link.content = result.content || "";
-  link.contentStatus = result.status === "ready" ? "ready" : "failed";
-  saveAndRender();
-  if (link.contentStatus === "failed") {
-    openPasteFallbackModal(link);
-  }
-}
-
-function saveManualReaderContent(link, rawText) {
-  const text = String(rawText || "").trim();
-  if (!text) {
-    alert("붙여넣을 본문을 입력해 주세요.");
+async function applyCheckpointUpdateFromInput(link, rawUrl) {
+  const parsed = normalizeUrl(String(rawUrl || "").trim());
+  if (!parsed) {
+    alert("올바른 링크를 붙여넣어 주세요.");
     return false;
   }
-  const wasReady = link.contentStatus === "ready";
-  link.content = window.KeepPointContentExtract.plainTextToReaderHtml(text);
-  link.contentStatus = "ready";
-  if (!wasReady) {
-    link.readerState = { scrollRatio: 0, lastParagraphId: null, updatedAt: null };
+  const fragment = parseTextFragmentFromUrl(parsed);
+  if (!fragment.hasFragment) {
+    alert("「선택한 텍스트로 링크 복사」로 만든 Text Fragment URL을 붙여넣어 주세요.");
+    return false;
   }
-  state.ui.editingManualContentLinkId = null;
+  if (getCanonicalPageKey(parsed) !== getCanonicalPageKey(getOriginalUrl(link))) {
+    alert("같은 페이지의 위치 링크만 이 카드에 업데이트할 수 있습니다.");
+    return false;
+  }
+  updateLinkCheckpoint(link, parsed);
   saveAndRender();
   return true;
 }
 
-function openPasteFallbackModal(link) {
-  if (!pasteFallbackModal || !link) return;
-  pasteFallbackLinkId = link.id;
-  if (pasteFallbackUrl) {
-    pasteFallbackUrl.textContent = getOriginalUrl(link);
-  }
-  if (pasteFallbackInput) pasteFallbackInput.value = "";
-  pasteFallbackModal.showModal();
-  pasteFallbackInput?.focus();
+function bindWebLinkDetailEvents(root, link) {
+  if (!root || !link) return () => {};
+  const linkId = link.id;
+  const handlers = [];
+  const on = (el, eventName, fn) => {
+    if (!el) return;
+    el.addEventListener(eventName, fn);
+    handlers.push(() => el.removeEventListener(eventName, fn));
+  };
+  const getCurrent = () => state.links.find((item) => item.id === linkId);
+
+  on(root.querySelector("#continueCheckpointBtn"), "click", (event) => {
+    event.stopPropagation();
+    const current = getCurrent();
+    if (current) openContinueReading(current);
+  });
+
+  on(root.querySelector("#openFromStartBtn"), "click", (event) => {
+    event.stopPropagation();
+    const current = getCurrent();
+    if (current) openFromBeginning(current);
+  });
+
+  on(root.querySelector("#updateCheckpointBtn"), "click", async (event) => {
+    event.stopPropagation();
+    const current = getCurrent();
+    if (!current) return;
+    const row = root.querySelector("#checkpointUpdateRow");
+    const input = root.querySelector("#checkpointUpdateInput");
+
+    try {
+      if (navigator.clipboard?.readText) {
+        const clip = String(await navigator.clipboard.readText()).trim();
+        if (clip && parseTextFragmentFromUrl(clip).hasFragment) {
+          const ok = await applyCheckpointUpdateFromInput(current, clip);
+          if (ok) return;
+        }
+      }
+    } catch {
+      /* fall through to manual paste */
+    }
+
+    if (row) row.hidden = false;
+    if (input) {
+      input.value = "";
+      input.focus();
+    }
+  });
+
+  on(root.querySelector("#checkpointUpdateSave"), "click", async (event) => {
+    event.stopPropagation();
+    const current = getCurrent();
+    const input = root.querySelector("#checkpointUpdateInput");
+    if (!current || !input) return;
+    await applyCheckpointUpdateFromInput(current, input.value);
+  });
+
+  on(root.querySelector("#checkpointUpdateCancel"), "click", (event) => {
+    event.stopPropagation();
+    const row = root.querySelector("#checkpointUpdateRow");
+    if (row) row.hidden = true;
+  });
+
+  on(root.querySelector("#checkpointUpdateInput"), "keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    root.querySelector("#checkpointUpdateSave")?.click();
+  });
+
+  root.querySelectorAll("[data-history-url]").forEach((btn) => {
+    on(btn, "click", (event) => {
+      event.stopPropagation();
+      const historyUrl = btn.getAttribute("data-history-url");
+      if (!historyUrl) return;
+      startReadingSession(getCurrent());
+      window.open(historyUrl, "_blank", "noopener,noreferrer");
+    });
+  });
+
+  root.querySelectorAll("[data-remove-point]").forEach((btn) => {
+    on(btn, "click", (event) => {
+      event.stopPropagation();
+      const current = getCurrent();
+      if (!current) return;
+      removeMemoryPoint(current, btn.getAttribute("data-remove-point"));
+      saveAndRender();
+    });
+  });
+
+  on(root.querySelector("#memoryAddToggle"), "click", (event) => {
+    event.stopPropagation();
+    const row = root.querySelector("#memoryAddRow");
+    if (!row) return;
+    row.hidden = !row.hidden;
+    if (!row.hidden) root.querySelector("#memoryAddInput")?.focus();
+  });
+
+  on(root.querySelector("#memoryAddCancel"), "click", (event) => {
+    event.stopPropagation();
+    const row = root.querySelector("#memoryAddRow");
+    if (row) row.hidden = true;
+  });
+
+  on(root.querySelector("#memoryAddSave"), "click", (event) => {
+    event.stopPropagation();
+    const current = getCurrent();
+    const input = root.querySelector("#memoryAddInput");
+    if (!current || !input) return;
+    if (addCustomMemoryPoint(current, input.value)) {
+      input.value = "";
+      const row = root.querySelector("#memoryAddRow");
+      if (row) row.hidden = true;
+      saveAndRender();
+    }
+  });
+
+  on(root.querySelector("#memoryAddInput"), "keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    root.querySelector("#memoryAddSave")?.click();
+  });
+
+  return () => handlers.forEach((off) => off());
 }
 
-function closePasteFallbackModal() {
-  pasteFallbackLinkId = null;
-  if (pasteFallbackModal?.open) pasteFallbackModal.close();
+function openHuntLinkById(linkId) {
+  const link = state.links.find((item) => item.id === linkId);
+  if (!link) return;
+  if (isPdfUrl(link.url)) {
+    openLinkForReading(link);
+    return;
+  }
+  state.ui.selectedLinkId = link.id;
+  if (link.categoryId) state.ui.selectedCategoryId = link.categoryId;
+  continueOnOriginal(link);
+}
+
+function bindHuntResumeEvents(root) {
+  if (!root) return () => {};
+  const handlers = [];
+  const on = (el, eventName, fn) => {
+    if (!el) return;
+    el.addEventListener(eventName, fn);
+    handlers.push(() => el.removeEventListener(eventName, fn));
+  };
+
+  const openFromButton = (event) => {
+    event.stopPropagation();
+    const linkId = event.currentTarget.getAttribute("data-open-link");
+    if (linkId) openHuntLinkById(linkId);
+  };
+
+  on(root.querySelector("#huntContinueBtn"), "click", openFromButton);
+  on(root.querySelector("#huntLastBtn"), "click", openFromButton);
+
+  root.querySelectorAll("[data-hunt-next]").forEach((btn) => {
+    on(btn, "click", (event) => {
+      event.stopPropagation();
+      const linkId = btn.getAttribute("data-hunt-next");
+      if (linkId) openHuntLinkById(linkId);
+    });
+  });
+
+  root.querySelectorAll("[data-hunt-link]").forEach((btn) => {
+    on(btn, "click", (event) => {
+      event.stopPropagation();
+      const linkId = btn.getAttribute("data-hunt-link");
+      if (!linkId) return;
+      const link = state.links.find((item) => item.id === linkId);
+      if (link) selectLink(link.id);
+    });
+  });
+
+  return () => handlers.forEach((off) => off());
+}
+
+let runtimeActiveSession = null;
+
+function startReadingSession(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  normalizeReadingSessions(link);
+  if (runtimeActiveSession) closeActiveReadingSession("manual");
+  const session = {
+    id: createId("rs"),
+    openedAt: new Date().toISOString(),
+    returnedAt: null,
+    durationMs: null,
+    closeReason: null
+  };
+  link.readingSessions.push(session);
+  if (link.readingSessions.length > SESSION_HISTORY_LIMIT) {
+    link.readingSessions = link.readingSessions.slice(-SESSION_HISTORY_LIMIT);
+  }
+  link.openCount = (link.openCount || 0) + 1;
+  link.lastVisitedAt = session.openedAt;
+  runtimeActiveSession = {
+    linkId: link.id,
+    sessionId: session.id,
+    openedAt: Date.now(),
+    ignoreCloseUntil: Date.now() + 1200
+  };
+  touchHuntForLink(link);
+  persistStateOnly();
+}
+
+function closeActiveReadingSession(reason = "focus") {
+  if (!runtimeActiveSession) return;
+  if (Date.now() < (runtimeActiveSession.ignoreCloseUntil || 0) && reason !== "manual") {
+    return;
+  }
+  const activeLinkId = runtimeActiveSession.linkId;
+  const link = state.links.find((l) => l.id === activeLinkId);
+  if (link) {
+    normalizeReadingSessions(link);
+    const session = link.readingSessions?.find((s) => s.id === runtimeActiveSession.sessionId);
+    if (session && !session.returnedAt) {
+      session.returnedAt = new Date().toISOString();
+      session.durationMs = Math.min(
+        SESSION_DURATION_CAP_MS,
+        Math.max(0, Date.now() - runtimeActiveSession.openedAt)
+      );
+      session.closeReason = reason;
+      link.lastVisitedAt = session.returnedAt;
+    }
+    touchHuntForLink(link);
+  }
+  runtimeActiveSession = null;
+  persistStateOnly();
+  if (state.ui.selectedLinkId === activeLinkId || !state.ui.selectedLinkId) saveAndRender();
+}
+
+function installReadingSessionListeners() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") closeActiveReadingSession("visibility");
+  });
+  window.addEventListener("focus", () => closeActiveReadingSession("focus"));
+}
+
+function buildReadingResumeBlock(link, { points, selectedPointId, manualDraft }) {
+  const status = link.readingPointsStatus || "pending";
+  const hasPoints = points.length >= 3;
+  const isLoading = status === "pending" || status === "generating" || status === "unset";
+  const showManualFallback = !hasPoints && !isLoading;
+
+  let bodyHtml = "";
+  if (hasPoints) {
+    bodyHtml = `<ul class="reading-points-list" role="list">
+      ${points
+        .map(
+          (p) => `<li>
+        <button type="button" class="reading-point-btn ${selectedPointId === p.id ? "active" : ""}" data-point-id="${escapeAttr(p.id)}">
+          <span class="point-marker" aria-hidden="true">${selectedPointId === p.id ? "●" : "○"}</span>
+          <span class="point-label">${escapeHtml(p.label)}</span>
+        </button>
+      </li>`
+        )
+        .join("")}
+    </ul>
+    <p class="reading-points-hint">탭 한 번으로 저장됩니다</p>`;
+  } else if (showManualFallback) {
+    bodyHtml = `<p class="manual-fallback-guide">짧은 단서만 적어 주세요. 다음에 바로 기억날 거예요.</p>
+      <div class="manual-point-field">
+        <input
+          type="text"
+          id="manualPointInput"
+          class="manual-point-input"
+          maxlength="20"
+          placeholder="예: 몽골 침입, Experiment"
+          value="${escapeAttr(manualDraft)}"
+          aria-label="읽기 위치 단서"
+        />
+        <button type="button" class="btn sm" id="saveManualPointBtn">저장</button>
+      </div>
+      <p class="manual-point-examples">예) 몽골 침입 · Experiment · 해결 방법</p>`;
+  } else {
+    bodyHtml = `<p class="reading-points-status">읽기 포인트를 준비하고 있어요…</p>`;
+  }
+
+  return `<section class="reading-points-section reading-resume-section" id="readingResumeSection" aria-labelledby="readingPointsQuestion">
+    <p class="reading-points-question" id="readingPointsQuestion">어디까지 읽었나요?</p>
+    ${bodyHtml}
+  </section>`;
+}
+
+function saveCurrentPosition(link, pointId) {
+  if (!pointId) return false;
+  selectReadingPoint(link, pointId);
+  return true;
+}
+
+function estimateProgressOnCheckIn(trail) {
+  const count = (trail.checkInCount || 0) + 1;
+  const stepped = Math.min(100, count * 25);
+  return Math.max(trail.progressPercent || 0, stepped);
+}
+
+function migrateLegacyWebFields(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  const trail = getWebReadTrail(link);
+  const m = link.webMemo;
+  if (m && typeof m === "object") {
+    if (!trail.locationNote && typeof m.readHint === "string") {
+      trail.locationNote = m.readHint.trim();
+    }
+    if (!trail.shortNote) {
+      trail.shortNote = [m.whySaved, m.keyPoints, m.myThoughts, m.nextPoint]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+    }
+  }
+  link.readTrail = trail;
+  delete link.webMemo;
+}
+
+function saveWebReadTrail(link, nextTrail) {
+  if (!link || !nextTrail) return;
+  const prev = getWebReadTrail(link);
+  link.readTrail = {
+    locationNote: String(nextTrail.locationNote ?? prev.locationNote).trim(),
+    selectedPointId: String(nextTrail.selectedPointId ?? prev.selectedPointId).trim(),
+    shortNote: String(nextTrail.shortNote ?? prev.shortNote).trim(),
+    selectedText: String(nextTrail.selectedText ?? prev.selectedText).trim(),
+    progressPercent: Math.max(0, Math.min(100, Number(nextTrail.progressPercent ?? prev.progressPercent) || 0)),
+    checkInCount: Math.max(0, Number(nextTrail.checkInCount ?? prev.checkInCount) || 0),
+    updatedAt: new Date().toISOString()
+  };
+  delete link.webMemo;
+  saveAndRender();
+}
+
+function getOriginalUrl(link) {
+  return stripTextFragment(link?.originalUrl || link?.url || "");
+}
+
+function getContinueUrl(link) {
+  const checkpoint = String(link?.checkpointUrl || "").trim();
+  if (checkpoint) return checkpoint;
+  return getOriginalUrl(link);
+}
+
+function stripTextFragment(url) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  try {
+    const u = new URL(value);
+    if (/:~:text=/i.test(u.hash)) u.hash = "";
+    return u.href;
+  } catch {
+    return value.replace(/#:~:.*$/i, "").replace(/#.*$/, "") || value;
+  }
+}
+
+function getCanonicalPageKey(url) {
+  try {
+    const u = new URL(stripTextFragment(url) || url);
+    const path = u.pathname.replace(/\/+$/, "") || "/";
+    return `${u.protocol}//${u.host.toLowerCase()}${path}${u.search}`.toLowerCase();
+  } catch {
+    return String(stripTextFragment(url) || url)
+      .trim()
+      .toLowerCase();
+  }
+}
+
+function parseTextFragmentFromUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return { hasFragment: false, text: "", checkpointUrl: "" };
+  let hash = "";
+  try {
+    hash = new URL(value).hash || "";
+  } catch {
+    const idx = value.indexOf("#");
+    hash = idx >= 0 ? value.slice(idx) : "";
+  }
+  const match = hash.match(/:~:text=([^&#]*)/i);
+  if (!match) return { hasFragment: false, text: "", checkpointUrl: "" };
+
+  const raw = match[1];
+  const parts = raw.split(",").map((part) => {
+    try {
+      return decodeURIComponent(part.replace(/\+/g, " "));
+    } catch {
+      return part;
+    }
+  });
+
+  let text = "";
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = String(parts[i] || "").trim();
+    if (!part) continue;
+    if (i === 0 && part.endsWith("-") && parts.length > 1) continue;
+    if (part.startsWith("-") && i === parts.length - 1) continue;
+    text = part.replace(/-$/, "").replace(/^-/, "").trim();
+    if (text) break;
+  }
+
+  return {
+    hasFragment: true,
+    text,
+    checkpointUrl: value
+  };
+}
+
+function findLinkByPageUrl(url) {
+  const key = getCanonicalPageKey(url);
+  if (!key) return null;
+  return (
+    (state.links || []).find((link) => !isPdfUrl(link.url) && getCanonicalPageKey(getOriginalUrl(link) || link.url) === key) ||
+    null
+  );
+}
+
+function normalizeCheckpointFields(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  if (!link.originalUrl) link.originalUrl = stripTextFragment(link.url || "");
+  else link.originalUrl = stripTextFragment(link.originalUrl);
+
+  const parsedFromUrl = parseTextFragmentFromUrl(link.url || "");
+  if (!link.checkpointUrl && parsedFromUrl.hasFragment) {
+    link.checkpointUrl = parsedFromUrl.checkpointUrl;
+    if (!link.checkpointText) link.checkpointText = parsedFromUrl.text;
+  }
+
+  if (typeof link.checkpointUrl !== "string") link.checkpointUrl = "";
+  if (typeof link.checkpointText !== "string") link.checkpointText = "";
+  if (!Array.isArray(link.checkpointHistory)) link.checkpointHistory = [];
+
+  link.checkpointHistory = link.checkpointHistory
+    .filter((item) => item && typeof item === "object" && item.url)
+    .map((item) => ({
+      url: String(item.url || ""),
+      text: String(item.text || parseTextFragmentFromUrl(item.url).text || ""),
+      savedAt: item.savedAt || null
+    }))
+    .slice(-20);
+
+  // Keep stored url as the clean page identity to avoid duplicate cards.
+  if (link.originalUrl) link.url = link.originalUrl;
+  if (link.checkpointUrl && !link.checkpointText) {
+    link.checkpointText = parseTextFragmentFromUrl(link.checkpointUrl).text || "";
+  }
+  if (!link.checkpointUpdatedAt && link.checkpointUrl) {
+    link.checkpointUpdatedAt = link.lastVisitedAt || link.savedAt || null;
+  }
+}
+
+function pushCheckpointHistory(link, url, text) {
+  if (!link || !url) return;
+  if (!Array.isArray(link.checkpointHistory)) link.checkpointHistory = [];
+  const last = link.checkpointHistory[link.checkpointHistory.length - 1];
+  if (last?.url === url) return;
+  link.checkpointHistory.push({
+    url,
+    text: text || parseTextFragmentFromUrl(url).text || "",
+    savedAt: new Date().toISOString()
+  });
+  if (link.checkpointHistory.length > 20) {
+    link.checkpointHistory = link.checkpointHistory.slice(-20);
+  }
+}
+
+function updateLinkCheckpoint(link, checkpointUrl, { select = true } = {}) {
+  if (!link || isPdfUrl(link.url)) return link;
+  normalizeCheckpointFields(link);
+  const parsed = parseTextFragmentFromUrl(checkpointUrl);
+  if (!parsed.hasFragment) return null;
+
+  const samePage = getCanonicalPageKey(checkpointUrl) === getCanonicalPageKey(getOriginalUrl(link));
+  if (!samePage) return null;
+
+  if (link.checkpointUrl && link.checkpointUrl !== parsed.checkpointUrl) {
+    pushCheckpointHistory(link, link.checkpointUrl, link.checkpointText);
+  }
+
+  link.checkpointUrl = parsed.checkpointUrl;
+  link.checkpointText = parsed.text || link.checkpointText || "";
+  link.checkpointUpdatedAt = new Date().toISOString();
+  link.lastVisitedAt = link.checkpointUpdatedAt;
+  link.originalUrl = stripTextFragment(checkpointUrl) || link.originalUrl;
+  link.url = link.originalUrl;
+
+  if (select) {
+    state.ui.selectedLinkId = link.id;
+    if (link.categoryId) state.ui.selectedCategoryId = link.categoryId;
+  }
+  return link;
+}
+
+function getCheckpointSnippet(link) {
+  normalizeCheckpointFields(link);
+  const text = String(link.checkpointText || "").trim();
+  if (text) return text;
+  if (link.checkpointUrl) return parseTextFragmentFromUrl(link.checkpointUrl).text || "";
+  return "";
+}
+
+function formatCheckpointUpdatedAt(link) {
+  const iso = link.checkpointUpdatedAt || link.lastVisitedAt || link.savedAt;
+  if (!iso) return "아직 없음";
+  return formatVisitWhen(iso) || relativeTime(iso);
+}
+
+function sourceNameFromUrl(url) {
+  try {
+    return new URL(stripTextFragment(url) || url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function getLinkSourceName(link) {
+  return link?.sourceName || sourceNameFromUrl(getOriginalUrl(link)) || "웹";
+}
+
+function getReadingStatus(link) {
+  return link?.readingStatus === "completed" ? "completed" : "reading";
+}
+
+function getReadingStatusLabel(status) {
+  return status === "completed" ? "완료" : "읽는 중";
+}
+
+function getProgressPercent(link) {
+  const trail = getWebReadTrail(link);
+  if (Number.isFinite(trail.progressPercent) && trail.progressPercent > 0) {
+    return Math.max(0, Math.min(100, trail.progressPercent));
+  }
+  const ratio = link?.readerState?.scrollRatio;
+  if (Number.isFinite(ratio) && ratio > 0) {
+    return Math.round(ratio * 100);
+  }
+  return 0;
+}
+
+function setReadingStatus(link, status) {
+  link.readingStatus = status === "completed" ? "completed" : "reading";
+  if (status === "completed") {
+    const trail = getWebReadTrail(link);
+    link.readTrail = { ...trail, progressPercent: 100, updatedAt: new Date().toISOString() };
+  }
+  saveAndRender();
+}
+
+function setProgressPercent(link, percent) {
+  const p = Math.max(0, Math.min(100, Number(percent) || 0));
+  const trail = getWebReadTrail(link);
+  link.readTrail = { ...trail, progressPercent: p, updatedAt: new Date().toISOString() };
+  if (p >= 100) link.readingStatus = "completed";
+  else if (link.readingStatus === "completed") link.readingStatus = "reading";
+  saveAndRender();
+}
+
+function appendReadVisit(link) {
+  link.lastVisitedAt = new Date().toISOString();
+  persistStateOnly();
+}
+
+function normalizeWebLink(link) {
+  if (!link || typeof link !== "object" || isPdfUrl(link.url)) return;
+  if (!link.originalUrl) link.originalUrl = link.url || "";
+  if (!link.sourceName) link.sourceName = sourceNameFromUrl(getOriginalUrl(link));
+  if (typeof link.ogImage !== "string") link.ogImage = "";
+  if (!link.readingStatus) {
+    link.readingStatus = getProgressPercent(link) >= 100 ? "completed" : "reading";
+  }
+  migrateLegacyWebFields(link);
+  migrateLegacyToSnapshot(link);
+  normalizeReadingSessions(link);
+  normalizeReadingPoints(link);
+  normalizeMemoryPoints(link);
+  normalizeCheckpointFields(link);
+  delete link.readingContinuity;
+  const trail = getWebReadTrail(link);
+  if (trail.progressPercent === 0 && link.readerState?.scrollRatio > 0) {
+    trail.progressPercent = Math.round(link.readerState.scrollRatio * 100);
+    link.readTrail = trail;
+  }
+  delete link.content;
+  delete link.contentStatus;
+  delete link.readerState;
+  delete link.estimatedReadMinutes;
+  delete link.readHistory;
+  delete link.webMemo;
+  link.readTrail = getWebReadTrail(link);
+}
+
+async function fetchLinkMetaClient(url) {
+  try {
+    const res = await fetch("/api/meta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url })
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeReadingPoints(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  if (!Array.isArray(link.readingPoints)) link.readingPoints = [];
+  link.readingPoints = getReadingPoints(link);
+  if (!link.readingPointsStatus) {
+    link.readingPointsStatus = link.readingPoints.length >= 3 ? "ready" : "pending";
+  }
+  if (link.readingPointsStatus === "failed" || link.readingPointsStatus === "manual") {
+    link.readingPointsStatus = link.readingPoints.length >= 3 ? "ready" : "unset";
+  }
+  if (link.readingPointsStatus === "ready" && link.readingPoints.length < 3) {
+    link.readingPointsStatus = "pending";
+  }
+}
+
+async function generateReadingPointsForLink(link) {
+  const url = getOriginalUrl(link);
+  if (!url || isPdfUrl(url)) return;
+  if (link.readingPointsStatus === "generating") return;
+  link.readingPointsStatus = "generating";
+  if (state.ui.selectedLinkId === link.id) saveAndRender();
+  else persistStateOnly();
+  try {
+    const res = await fetch("/api/outline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        title: link.title,
+        siteName: getLinkSourceName(link)
+      })
+    });
+    if (!res.ok) throw new Error("analyze failed");
+    const data = await res.json();
+    const labels = Array.isArray(data.points) ? data.points : [];
+    link.readingPoints = labels
+      .map((label) => String(label || "").trim())
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((label) => ({ id: createId("rp"), label }));
+    link.readingPointsStatus = link.readingPoints.length >= 3 ? "ready" : "unset";
+  } catch {
+    link.readingPoints = [];
+    link.readingPointsStatus = "unset";
+  }
+  saveAndRender();
+}
+
+function queueReadingPointsGeneration(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  if (getReadingPoints(link).length >= 3) return;
+  if (link.readingPointsStatus === "generating") return;
+  if (runtimeOutlineQueued.has(link.id)) return;
+  runtimeOutlineQueued.add(link.id);
+  generateReadingPointsForLink(link).finally(() => runtimeOutlineQueued.delete(link.id));
+}
+
+function ensureReadingPoints(link) {
+  queueReadingPointsGeneration(link);
+}
+
+async function fetchAndApplyLinkMeta(link) {
+  const url = getOriginalUrl(link);
+  if (!url || isPdfUrl(url)) return;
+  const hostTitle = sourceNameFromUrl(url) || "새 링크";
+  const meta = await fetchLinkMetaClient(url);
+  if (meta?.title && (!link.title || link.title === hostTitle || link.title === "새 링크")) {
+    link.title = meta.title;
+  } else if (!link.title || link.title === "새 링크") {
+    link.title = hostTitle;
+  }
+  if (meta?.description && !String(link.description || "").trim()) {
+    link.description = meta.description;
+  }
+  if (meta?.sourceName) link.sourceName = meta.sourceName;
+  else if (!link.sourceName) link.sourceName = hostTitle;
+  if (meta?.ogImage) link.ogImage = meta.ogImage;
+  link.metaFetchedAt = new Date().toISOString();
+  await ensureMemoryPoints(link, { force: true });
+  saveAndRender();
+}
+
+async function enrichLinkMetaOnly(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  await fetchAndApplyLinkMeta(link);
+  saveAndRender();
+}
+
+function startLinkEnrichment(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  normalizeMemoryPoints(link);
+  if (!link.memoryPoints.suggested.length) {
+    const local = generateMemoryPoints({
+      url: getOriginalUrl(link),
+      title: link.title || "",
+      description: link.description || "",
+      sourceName: link.sourceName || ""
+    });
+    applySuggestedMemoryPoints(link, local, "heuristic");
+  }
+  void enrichLinkMetaOnly(link);
+}
+
+async function enrichLinkMeta(link) {
+  startLinkEnrichment(link);
+}
+
+function serializeStateForStorage(src) {
+  const clone = structuredClone(src);
+  for (const link of clone.links || []) {
+    delete link.readingMoment;
+  }
+  return clone;
+}
+
+function persistStateOnly() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeStateForStorage(state)));
+  if (auth.isLoggedIn) {
+    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(serializeStateForStorage(state)));
+  }
+}
+
+function openOriginalUrl(link) {
+  openFromBeginning(link);
+}
+
+function continueOnOriginal(link) {
+  openContinueReading(link);
 }
 
 const defaultData = {
@@ -656,13 +2525,13 @@ const defaultData = {
     }
   ],
   localPdfs: [],
+  hunts: [],
   ui: {
     selectedCategoryId: ALL_CATEGORY,
     selectedLinkId: "l2",
+    activeHuntId: null,
     expandedDescription: false,
-    readPositions: {},
-    loginPromptedForLimit: false,
-    editingManualContentLinkId: null
+    loginPromptedForLimit: false
   }
 };
 
@@ -672,6 +2541,7 @@ normalizeState();
 const autoSaveTimers = new Map();
 const readPositionTimers = new Map();
 const runtimeSaveStatus = {};
+const runtimeOutlineQueued = new Set();
 let teardownDetailView = () => {};
 
 const categoryTabs = document.getElementById("categoryTabs");
@@ -714,13 +2584,6 @@ const profileNameInput = document.getElementById("profileNameInput");
 const profileEmailInput = document.getElementById("profileEmailInput");
 const profileProviderInput = document.getElementById("profileProviderInput");
 const deleteAccountBtn = document.getElementById("deleteAccountBtn");
-const pasteFallbackModal = document.getElementById("pasteFallbackModal");
-const pasteFallbackForm = document.getElementById("pasteFallbackForm");
-const pasteFallbackInput = document.getElementById("pasteFallbackInput");
-const pasteFallbackUrl = document.getElementById("pasteFallbackUrl");
-const pasteFallbackSaveBtn = document.getElementById("pasteFallbackSaveBtn");
-const pasteFallbackOpenOriginalBtn = document.getElementById("pasteFallbackOpenOriginalBtn");
-let pasteFallbackLinkId = null;
 let authModalMode = "login";
 const guestNotice = document.getElementById("guestNotice");
 const syncAcrossDevicesBtn = document.getElementById("syncAcrossDevicesBtn");
@@ -762,31 +2625,14 @@ if (syncAcrossDevicesBtn) syncAcrossDevicesBtn.addEventListener("click", onSyncA
 if (connectExtensionBtn) connectExtensionBtn.addEventListener("click", onConnectExtensionClick);
 if (saveAiSummaryBtn) saveAiSummaryBtn.addEventListener("click", onSaveAiSummaryClick);
 if (createShareLinkBtn) createShareLinkBtn.addEventListener("click", onCreateShareLinkClick);
-if (quickAddInput) quickAddInput.addEventListener("keydown", onQuickAdd);
+if (quickAddInput) {
+  quickAddInput.addEventListener("keydown", onQuickAdd);
+  quickAddInput.addEventListener("paste", onQuickAddPaste);
+}
 if (quickAddBtn) quickAddBtn.addEventListener("click", addQuickLinkFromInput);
 if (pickPdfBtn && pdfFileInput) {
   pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
   pdfFileInput.addEventListener("change", onPdfFileSelected);
-}
-if (pasteFallbackSaveBtn) {
-  pasteFallbackSaveBtn.addEventListener("click", () => {
-    const link = state.links.find((l) => l.id === pasteFallbackLinkId);
-    if (!link) return;
-    if (saveManualReaderContent(link, pasteFallbackInput?.value || "")) {
-      closePasteFallbackModal();
-    }
-  });
-}
-if (pasteFallbackOpenOriginalBtn) {
-  pasteFallbackOpenOriginalBtn.addEventListener("click", () => {
-    const link = state.links.find((l) => l.id === pasteFallbackLinkId);
-    if (link) openOriginalUrl(link);
-  });
-}
-if (pasteFallbackForm) {
-  pasteFallbackForm.addEventListener("close", () => {
-    pasteFallbackLinkId = null;
-  });
 }
 
 function requireLoginFor(reason) {
@@ -1127,7 +2973,23 @@ async function onQuickAdd(event) {
   await addQuickLinkFromInput();
 }
 
+function looksLikeUrl(text) {
+  const trimmed = String(text || "").trim();
+  return /^https?:\/\//i.test(trimmed) || /^www\./i.test(trimmed);
+}
+
+async function onQuickAddPaste() {
+  setTimeout(async () => {
+    const rawUrl = quickAddInput?.value?.trim() || "";
+    if (!looksLikeUrl(rawUrl)) return;
+    await addQuickLinkFromInput();
+  }, 0);
+}
+
+let quickAddInProgress = false;
+
 async function addQuickLinkFromInput() {
+  if (quickAddInProgress) return;
   const rawUrl = quickAddInput.value.trim();
   if (!rawUrl) return;
 
@@ -1150,57 +3012,65 @@ async function addQuickLinkFromInput() {
     return;
   }
 
-  const previousCount = getSavedItemCount();
-  const isPdf = isPdfUrl(parsed);
-  let title = await autoTitleFromUrl(parsed);
-  let content = "";
-  let contentStatus = "failed";
-
-  if (!isPdf) {
-    if (quickAddBtn) {
-      quickAddBtn.disabled = true;
-      quickAddBtn.textContent = "본문 가져오는 중...";
-    }
-    try {
-      const extracted = await window.KeepPointContentExtract.extractFromUrl(parsed);
-      if (extracted.title) title = extracted.title;
-      content = extracted.content || "";
-      contentStatus = extracted.status === "ready" ? "ready" : "failed";
-    } catch {
-      contentStatus = "failed";
-    } finally {
-      if (quickAddBtn) {
-        quickAddBtn.disabled = false;
-        quickAddBtn.textContent = "추가";
+  quickAddInProgress = true;
+  try {
+    const isPdf = isPdfUrl(parsed);
+    if (!isPdf) {
+      const existing = findLinkByPageUrl(parsed);
+      const fragment = parseTextFragmentFromUrl(parsed);
+      if (existing) {
+        if (fragment.hasFragment) {
+          updateLinkCheckpoint(existing, parsed);
+        } else {
+          state.ui.selectedLinkId = existing.id;
+          if (existing.categoryId) state.ui.selectedCategoryId = existing.categoryId;
+          existing.lastVisitedAt = new Date().toISOString();
+        }
+        quickAddInput.value = "";
+        saveAndRender();
+        return;
       }
     }
-  }
 
-  const link = {
-    id: createId("l"),
-    categoryId: targetCategoryId,
-    title,
-    url: parsed,
-    originalUrl: parsed,
-    content,
-    contentStatus: isPdf ? null : contentStatus,
-    readerState: { scrollRatio: 0, lastParagraphId: null, updatedAt: null },
-    tags: [],
-    description: "",
-    webMemo: { whySaved: "", keyPoints: "", myThoughts: "", nextPoint: "", tagsText: "", readHint: "", updatedAt: null },
-    readTrail: { locationNote: "", selectedText: "", progressPercent: 0, updatedAt: null },
-    lastVisitedAt: new Date().toISOString()
-  };
+    const previousCount = getSavedItemCount();
+    const hostTitle = sourceNameFromUrl(parsed) || "새 링크";
+    const fragment = parseTextFragmentFromUrl(parsed);
+    const cleanUrl = stripTextFragment(parsed) || parsed;
 
-  state.links.unshift(link);
-  state.ui.selectedCategoryId = targetCategoryId;
-  selectLink(link.id);
-  quickAddInput.value = "";
-  saveAndRender();
-  if (!isPdf && contentStatus === "failed") {
-    openPasteFallbackModal(link);
+    const link = {
+      id: createId("l"),
+      categoryId: targetCategoryId,
+      title: hostTitle,
+      url: cleanUrl,
+      originalUrl: cleanUrl,
+      checkpointUrl: fragment.hasFragment ? fragment.checkpointUrl : "",
+      checkpointText: fragment.hasFragment ? fragment.text : "",
+      checkpointUpdatedAt: fragment.hasFragment ? new Date().toISOString() : null,
+      checkpointHistory: [],
+      sourceName: hostTitle,
+      ogImage: "",
+      description: "",
+      savedAt: new Date().toISOString(),
+      readingSessions: [],
+      openCount: 0,
+      memoryPoints: { suggested: [], custom: [], removed: [], status: "pending", source: "", generatedAt: null },
+      tags: [],
+      lastVisitedAt: new Date().toISOString()
+    };
+
+    state.links.unshift(link);
+    state.ui.selectedCategoryId = targetCategoryId;
+    quickAddInput.value = "";
+    selectLink(link.id);
+
+    if (!isPdf) {
+      startLinkEnrichment(link);
+    }
+
+    maybePromptLoginByLimit(previousCount);
+  } finally {
+    quickAddInProgress = false;
   }
-  maybePromptLoginByLimit(previousCount);
 }
 
 function openLocalPdfViewer(id) {
@@ -1279,6 +3149,7 @@ async function onPdfFileSelected() {
 }
 
 function render() {
+  rebuildHunts();
   if (profileName) profileName.textContent = auth.isLoggedIn ? `${state.profile.name}` : "게스트";
   if (openLoginBtn) openLoginBtn.textContent = auth.isLoggedIn ? "다른 계정 로그인" : "로그인";
   if (openLoginBtn) openLoginBtn.disabled = false;
@@ -1292,7 +3163,7 @@ function render() {
   renderRecent();
   renderLocalPdfList();
   renderLinks();
-  renderDetail();
+  void renderDetail();
 }
 
 function renderTabs() {
@@ -1317,17 +3188,19 @@ function renderTabs() {
 function renderRecent() {
   recentList.innerHTML = "";
   const recent = [...state.links]
+    .filter((link) => !isPdfUrl(link.url))
     .sort((a, b) => new Date(b.lastVisitedAt || 0) - new Date(a.lastVisitedAt || 0))
     .slice(0, 5);
 
   if (!recent.length) {
-    recentList.innerHTML = "<li>아직 최근 읽기 기록이 없습니다.</li>";
+    recentList.innerHTML = "<li class='muted'>아직 저장된 링크가 없습니다.</li>";
     return;
   }
 
   for (const link of recent) {
     const li = document.createElement("li");
-    li.textContent = `${link.title} (${relativeTime(link.lastVisitedAt)})`;
+    const hint = getContextHint(link);
+    li.innerHTML = `<strong>${escapeHtml(shortText(hint, 40))}</strong><span class="recent-resume">${escapeHtml(shortText(link.title, 36))}</span>`;
     li.addEventListener("click", () => {
       state.ui.selectedCategoryId = link.categoryId;
       selectLink(link.id);
@@ -1401,10 +3274,6 @@ function renderLinks() {
 
   for (const link of getVisibleLinks()) {
     const isPdf = isPdfUrl(link.url);
-    const memo = getWebMemo(link);
-    const readerState = getReaderState(link);
-    const progressLine =
-      readerState.scrollRatio > 0 ? `${Math.round(readerState.scrollRatio * 100)}%` : "0%";
     const li = document.createElement("li");
     li.className = "item";
     if (link.id === state.ui.selectedLinkId) li.classList.add("active");
@@ -1421,14 +3290,13 @@ function renderLinks() {
         </div>
       `;
     } else {
+      const hint = getContextHint(link);
       li.innerHTML = `
-        <div>${escapeHtml(link.title)}</div>
-        <div class="meta">원본: ${escapeHtml(shortText(getOriginalUrl(link), 55))}</div>
-        <div class="meta content-status ${link.contentStatus === "ready" ? "ready" : "failed"}">${escapeHtml(getContentStatusLabel(link.contentStatus))}</div>
-        <div class="meta">Reader 진행: ${progressLine}</div>
+        <div class="item-title">${escapeHtml(link.title)}</div>
+        <div class="meta item-source">${escapeHtml(getLinkSourceName(link))}</div>
+        <div class="item-resume-hint">${escapeHtml(shortText(hint, 56))}</div>
         <div class="hover-actions">
-          <button class="btn" data-action="continue">이어보기</button>
-          <button class="btn ghost" data-action="original">원본 보기</button>
+          <button class="btn" data-action="continue">계속 읽기</button>
           <button class="btn ghost" data-action="share">공유</button>
           <button class="btn danger" data-action="delete">삭제</button>
         </div>
@@ -1437,9 +3305,14 @@ function renderLinks() {
 
     li.addEventListener("click", (event) => {
       const action = event.target?.dataset?.action;
+      if (action === "save-position" || action === "mark-read") {
+        event.stopPropagation();
+        selectLink(link.id);
+        return;
+      }
       if (action === "continue") {
         event.stopPropagation();
-        openLinkForReading(link);
+        continueOnOriginal(link);
         return;
       }
       if (action === "original") {
@@ -1463,84 +3336,48 @@ function renderLinks() {
   }
 }
 
-function renderDetail() {
+async function renderDetail() {
   teardownDetailView();
-  const link = state.links.find((item) => item.id === state.ui.selectedLinkId);
+  const selectedId = state.ui.selectedLinkId;
+  const link = state.links.find((item) => item.id === selectedId);
+
   if (!link) {
     detailView.classList.add("empty");
-    detailView.textContent = "링크가 없습니다. 링크를 붙여넣어 바로 추가해 보세요.";
+    detailView.textContent = "링크를 저장하면 기억 포인트가 여기에 나타납니다.";
     teardownDetailView = () => {};
     return;
   }
 
   detailView.classList.remove("empty");
+
+  if (state.ui.selectedLinkId !== selectedId) return;
   const isPdf = isPdfUrl(link.url);
-  const webMemo = getWebMemo(link);
+  if (!isPdf) {
+    void ensureMemoryPoints(link);
+  }
   const pdfSnap = isPdf ? getPdfSnapshotFromStorage(link.url) : null;
   const saveStatusText = runtimeSaveStatus[link.id] || "저장됨";
 
   const pdfPageLine =
     pdfSnap && pdfSnap.pageNumber != null ? `마지막 페이지: ${pdfSnap.pageNumber}` : "저장된 페이지 없음";
 
-  const webMemoHtml = `
-    <section class="resume-card reader-detail-card ${link.contentStatus !== "ready" || state.ui.editingManualContentLinkId === link.id ? "fallback-paste-card" : ""}">
-      <strong>KeepPoint Reader</strong>
-      <p class="meta content-status ${link.contentStatus === "ready" ? "ready" : "failed"}">${escapeHtml(getContentStatusLabel(link.contentStatus))}</p>
-      ${link.contentStatus !== "ready"
-        ? `<p class="meta fallback-hint">자동 추출이 실패했습니다. 아래에 본문을 붙여넣거나 「본문 붙여넣기」 버튼을 사용하세요.</p>`
-        : ""}
-      <p class="meta">읽기 진행: ${Math.round(getReaderState(link).scrollRatio * 100)}%</p>
-      <div class="resume-actions">
-        <button type="button" class="btn" id="continueReaderBtn">이어보기</button>
-        <button type="button" class="btn ghost" id="openOriginalBtn">원본 보기</button>
-        <button type="button" class="btn ghost" id="retryExtractBtn">본문 다시 가져오기</button>
-        ${link.contentStatus !== "ready" ? `<button type="button" class="btn ghost" id="openPasteFallbackBtn">본문 붙여넣기</button>` : ""}
-        ${link.contentStatus === "ready" && state.ui.editingManualContentLinkId !== link.id
-          ? `<button type="button" class="btn ghost" id="editManualContentBtn">본문 수정하기</button>`
-          : ""}
-      </div>
-      ${link.contentStatus !== "ready"
-        ? `<label class="trail-field fallback-paste-field">본문 직접 붙여넣기
-            <textarea id="manualContentInput" rows="10" placeholder="원문 사이트에서 본문을 복사해 붙여넣으세요."></textarea>
-          </label>
-          <button type="button" class="btn" id="saveManualContentBtn">본문 저장</button>`
-        : state.ui.editingManualContentLinkId === link.id
-          ? `<label class="trail-field fallback-paste-field">본문 수정
-              <textarea id="manualContentInput" rows="10" placeholder="본문을 수정하세요.">${escapeHtml(window.KeepPointContentExtract?.readerHtmlToPlainText?.(link.content) || "")}</textarea>
-            </label>
-            <div class="resume-actions">
-              <button type="button" class="btn" id="saveManualContentBtn">본문 저장</button>
-              <button type="button" class="btn ghost" id="cancelEditManualContentBtn">취소</button>
-            </div>`
-          : ""}
-    </section>
-    <section class="resume-card">
-      <strong>메모</strong>
-      <label class="trail-field">왜 저장했는지
-        <textarea id="webWhySavedInput" rows="2">${escapeHtml(webMemo.whySaved)}</textarea>
-      </label>
-      <label class="trail-field">핵심 내용
-        <textarea id="webKeyPointsInput" rows="3">${escapeHtml(webMemo.keyPoints)}</textarea>
-      </label>
-      <label class="trail-field">태그 (쉼표로 구분)
-        <input id="webTagsInput" placeholder="예: 역사, 논문" value="${escapeAttr(webMemo.tagsText)}" />
-      </label>
-    </section>
-  `;
+  const webPanelHtml = !isPdf ? renderWebLinkDetailPanel(link) : "";
 
   detailView.innerHTML = `
     <div class="hover-actions">
       <button class="btn ghost" id="shareCurrentBtn">공유</button>
       <button class="btn danger" id="deleteCurrentBtn">삭제</button>
     </div>
-    <h3>${escapeHtml(link.title)}</h3>
-    <a href="${escapeAttr(getOriginalUrl(link))}" target="_blank" rel="noreferrer">원문 링크</a>
     ${isPdf
-      ? `<div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
-      : webMemoHtml}
-    <div class="save-row">
+      ? `<h3>${escapeHtml(link.title)}</h3>
+         <a href="${escapeAttr(getOriginalUrl(link))}" target="_blank" rel="noreferrer">원문 링크</a>
+         <div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
+      : webPanelHtml}
+    ${isPdf
+      ? `<div class="save-row">
       <span id="saveStatus" class="save-status">${escapeHtml(saveStatusText)}</span>
-    </div>
+    </div>`
+      : ""}
     ${isPdf
       ? `<label>
           태그
@@ -1554,7 +3391,6 @@ function renderDetail() {
         </label>
         <p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`
       : ""}
-    <div class="meta">📍 마지막 방문: ${relativeTime(link.lastVisitedAt)}</div>
   `;
 
   const statusEl = document.getElementById("saveStatus");
@@ -1565,17 +3401,7 @@ function renderDetail() {
   const openPdfBtn = document.getElementById("openPdfBtn");
   const restartPdfBtn = document.getElementById("restartPdfBtn");
   const clearPdfBtn = document.getElementById("clearPdfBtn");
-  const webWhySavedInput = document.getElementById("webWhySavedInput");
-  const webKeyPointsInput = document.getElementById("webKeyPointsInput");
-  const webTagsInput = document.getElementById("webTagsInput");
-  const continueReaderBtn = document.getElementById("continueReaderBtn");
-  const openOriginalBtn = document.getElementById("openOriginalBtn");
-  const retryExtractBtn = document.getElementById("retryExtractBtn");
-  const manualContentInput = document.getElementById("manualContentInput");
-  const saveManualContentBtn = document.getElementById("saveManualContentBtn");
-  const openPasteFallbackBtn = document.getElementById("openPasteFallbackBtn");
-  const editManualContentBtn = document.getElementById("editManualContentBtn");
-  const cancelEditManualContentBtn = document.getElementById("cancelEditManualContentBtn");
+  let unbindWebLinkEvents = () => {};
   let draftDesc = link.description || "";
   let draftTags = [...link.tags];
 
@@ -1680,47 +3506,11 @@ function renderDetail() {
     localStorage.removeItem(getPdfReadingStorageKey(link.url));
     saveAndRender();
   };
-  const readWebMemoDraft = () => ({
-    readHint: getWebMemo(link).readHint,
-    whySaved: webWhySavedInput?.value || "",
-    keyPoints: webKeyPointsInput?.value || "",
-    myThoughts: getWebMemo(link).myThoughts,
-    nextPoint: getWebMemo(link).nextPoint,
-    tagsText: webTagsInput?.value || ""
-  });
-  const onWebMemoInput = () => {
-    saveWebMemo(link, readWebMemoDraft());
-    updateStatus("저장됨");
-  };
-
   if (openPdfBtn) openPdfBtn.addEventListener("click", onOpenPdfClick);
   if (restartPdfBtn) restartPdfBtn.addEventListener("click", onRestartPdfClick);
   if (clearPdfBtn) clearPdfBtn.addEventListener("click", onClearPdfClick);
   if (!isPdf) {
-    continueReaderBtn?.addEventListener("click", () => openReader(link.id, false));
-    openOriginalBtn?.addEventListener("click", () => openOriginalUrl(link));
-    retryExtractBtn?.addEventListener("click", async () => {
-      retryExtractBtn.disabled = true;
-      retryExtractBtn.textContent = "가져오는 중...";
-      await extractAndApplyToLink(link);
-      retryExtractBtn.disabled = false;
-      retryExtractBtn.textContent = "본문 다시 가져오기";
-    });
-    saveManualContentBtn?.addEventListener("click", () => {
-      saveManualReaderContent(link, manualContentInput?.value || "");
-    });
-    editManualContentBtn?.addEventListener("click", () => {
-      state.ui.editingManualContentLinkId = link.id;
-      saveAndRender();
-    });
-    cancelEditManualContentBtn?.addEventListener("click", () => {
-      state.ui.editingManualContentLinkId = null;
-      saveAndRender();
-    });
-    openPasteFallbackBtn?.addEventListener("click", () => openPasteFallbackModal(link));
-    if (webWhySavedInput) webWhySavedInput.addEventListener("blur", onWebMemoInput);
-    if (webKeyPointsInput) webKeyPointsInput.addEventListener("blur", onWebMemoInput);
-    if (webTagsInput) webTagsInput.addEventListener("blur", onWebMemoInput);
+    unbindWebLinkEvents = bindWebLinkDetailEvents(detailView, link);
   }
 
   const onShareClick = () => shareLink(link.id);
@@ -1731,6 +3521,7 @@ function renderDetail() {
   if (deleteCurrentBtn) deleteCurrentBtn.addEventListener("click", onDeleteClick);
 
   teardownDetailView = () => {
+    document.getElementById("snapshotLightbox")?.remove();
     clearTimeout(autoSaveTimers.get(link.id));
     clearTimeout(readPositionTimers.get(link.id));
     if (onDescInput && descInput) descInput.removeEventListener("input", onDescInput);
@@ -1738,9 +3529,7 @@ function renderDetail() {
     if (openPdfBtn) openPdfBtn.removeEventListener("click", onOpenPdfClick);
     if (restartPdfBtn) restartPdfBtn.removeEventListener("click", onRestartPdfClick);
     if (clearPdfBtn) clearPdfBtn.removeEventListener("click", onClearPdfClick);
-    if (webWhySavedInput) webWhySavedInput.removeEventListener("blur", onWebMemoInput);
-    if (webKeyPointsInput) webKeyPointsInput.removeEventListener("blur", onWebMemoInput);
-    if (webTagsInput) webTagsInput.removeEventListener("blur", onWebMemoInput);
+    unbindWebLinkEvents();
     if (shareCurrentBtn) shareCurrentBtn.removeEventListener("click", onShareClick);
     if (deleteCurrentBtn) deleteCurrentBtn.removeEventListener("click", onDeleteClick);
   };
@@ -1749,12 +3538,11 @@ function renderDetail() {
 function selectLink(linkId) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
-  if (state.ui.editingManualContentLinkId && state.ui.editingManualContentLinkId !== linkId) {
-    state.ui.editingManualContentLinkId = null;
-  }
   state.ui.selectedLinkId = linkId;
   state.ui.expandedDescription = false;
   link.lastVisitedAt = new Date().toISOString();
+  const hunt = getHuntForLink(link);
+  if (hunt) setActiveHunt(hunt.id);
   saveAndRender();
 }
 
@@ -1786,8 +3574,11 @@ function deleteLink(linkId) {
   if (!link) return;
   if (!confirm(`'${link.title}' 링크를 삭제할까요?`)) return;
   state.links = state.links.filter((item) => item.id !== linkId);
-  delete state.ui.readPositions[linkId];
-  localStorage.removeItem(getPdfReadingStorageKey(link.url));
+  if (link && isPdfUrl(link.url)) {
+    localStorage.removeItem(getPdfReadingStorageKey(link.url));
+  } else if (link) {
+    idbDeleteVisualRecord(linkId).catch(console.error);
+  }
   clearTimeout(readPositionTimers.get(linkId));
   state.ui.selectedLinkId = getVisibleLinks()[0]?.id || null;
   saveAndRender();
@@ -1797,20 +3588,10 @@ function shareLink(linkId) {
   if (!requireLoginFor("share-link")) return;
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
-  const category = state.categories.find((item) => item.id === link.categoryId);
-  const memo = getWebMemo(link);
-  const payload = [
-    `카테고리: ${category?.name || "없음"}`,
-    `제목: ${link.title}`,
-    `원본: ${getOriginalUrl(link)}`,
-    `Reader 진행: ${Math.round(getReaderState(link).scrollRatio * 100)}%`,
-    `왜 저장했는지: ${memo.whySaved || "없음"}`,
-    `핵심 내용: ${memo.keyPoints || "없음"}`,
-    `태그: ${memo.tagsText || "없음"}`
-  ].join("\n");
+  const payload = buildShareHuntText(link);
   navigator.clipboard
     .writeText(payload)
-    .then(() => alert("공유 내용이 복사되었습니다."))
+    .then(() => alert("이어 읽기 정보가 복사되었습니다."))
     .catch(() => alert("복사에 실패했습니다."));
 }
 
@@ -1838,6 +3619,8 @@ function getVisibleLocalPdfs() {
 function normalizeState() {
   if (!state.ui || typeof state.ui !== "object") state.ui = {};
   if (!Array.isArray(state.localPdfs)) state.localPdfs = [];
+  if (!Array.isArray(state.hunts)) state.hunts = [];
+  if (!("activeHuntId" in state.ui)) state.ui.activeHuntId = null;
   const fallbackCategoryId = state.categories?.[0]?.id || null;
   for (const pdf of state.localPdfs) {
     if (!pdf.categoryId && fallbackCategoryId) {
@@ -1846,56 +3629,36 @@ function normalizeState() {
   }
   if (!state.profile || typeof state.profile !== "object") state.profile = { name: "게스트" };
   if (!state.ui.loginPromptedForLimit) state.ui.loginPromptedForLimit = false;
-  if (state.ui.editingManualContentLinkId === undefined) state.ui.editingManualContentLinkId = null;
   for (const link of state.links || []) {
-    if (!link.webMemo || typeof link.webMemo !== "object") {
-      const legacyTrail = getWebReadTrail(link);
-      link.webMemo = {
-        whySaved: "",
-        keyPoints: "",
-        myThoughts: "",
-        nextPoint: "",
-        tagsText: Array.isArray(link.tags) ? link.tags.join(", ") : "",
-        readHint: legacyTrail.locationNote || "",
-        updatedAt: legacyTrail.updatedAt || null
-      };
-    } else {
-      link.webMemo = getWebMemo(link);
-    }
     if (!link.readTrail || typeof link.readTrail !== "object") {
-      link.readTrail = { locationNote: "", selectedText: "", progressPercent: 0, updatedAt: null };
+      link.readTrail = {
+        locationNote: "",
+        selectedPointId: "",
+        shortNote: "",
+        selectedText: "",
+        progressPercent: 0,
+        checkInCount: 0,
+        updatedAt: null
+      };
     } else {
       link.readTrail = getWebReadTrail(link);
     }
     if (!isPdfUrl(link.url)) {
-      normalizeReaderLink(link);
+      normalizeWebLink(link);
+      normalizeReadingSessions(link);
     }
   }
-  if (!state.ui.readPositions) state.ui.readPositions = {};
-  for (const [linkId, value] of Object.entries(state.ui.readPositions)) {
-    if (typeof value === "number") {
-      state.ui.readPositions[linkId] = {
-        url: "",
-        scrollY: 0,
-        scrollProgress: Math.round(value * 10000) / 100,
-        textAnchor: "",
-        savedAt: null
-      };
-    } else {
-      state.ui.readPositions[linkId] = {
-        url: typeof value?.url === "string" ? value.url : "",
-        scrollY: Number.isFinite(value?.scrollY) ? value.scrollY : 0,
-        scrollProgress: Number.isFinite(value?.scrollProgress) ? value.scrollProgress : 0,
-        textAnchor: typeof value?.textAnchor === "string" ? value.textAnchor : "",
-        savedAt: value?.savedAt || null
-      };
-    }
-  }
+  rebuildHunts();
   if (!state.categories.some((c) => c.id === state.ui.selectedCategoryId) && state.ui.selectedCategoryId !== ALL_CATEGORY) {
     state.ui.selectedCategoryId = ALL_CATEGORY;
   }
   if (!state.links.some((l) => l.id === state.ui.selectedLinkId)) {
-    state.ui.selectedLinkId = state.links.sort((a, b) => new Date(b.lastVisitedAt || 0) - new Date(a.lastVisitedAt || 0))[0]?.id || null;
+    const hunt = getActiveHunt();
+    state.ui.selectedLinkId =
+      hunt?.nextLinkId ||
+      hunt?.lastLinkId ||
+      [...state.links].sort((a, b) => new Date(b.lastVisitedAt || 0) - new Date(a.lastVisitedAt || 0))[0]?.id ||
+      null;
   }
 }
 
@@ -1923,15 +3686,6 @@ function normalizeUrl(value) {
   }
 }
 
-async function autoTitleFromUrl(url) {
-  try {
-    const host = new URL(url).hostname.replace("www.", "");
-    return host;
-  } catch {
-    return "새 링크";
-  }
-}
-
 function shortText(value, maxLen) {
   return value.length <= maxLen ? value : `${value.slice(0, maxLen)}...`;
 }
@@ -1943,89 +3697,6 @@ function relativeTime(iso) {
   if (day <= 0) return "오늘";
   if (day === 1) return "1일 전";
   return `${day}일 전`;
-}
-
-function getScrollableHeight(element) {
-  return Math.max(1, element.scrollHeight - element.clientHeight);
-}
-
-function getScrollRatio(element) {
-  return Math.min(1, Math.max(0, element.scrollTop / getScrollableHeight(element)));
-}
-
-function getReadPosition(linkId) {
-  const value = state.ui.readPositions[linkId];
-  if (!value) return { url: "", scrollY: 0, scrollProgress: 0, textAnchor: "", savedAt: null };
-  return {
-    url: typeof value.url === "string" ? value.url : "",
-    scrollY: Number.isFinite(value.scrollY) ? value.scrollY : 0,
-    scrollProgress: Number.isFinite(value.scrollProgress) ? value.scrollProgress : 0,
-    textAnchor: typeof value.textAnchor === "string" ? value.textAnchor : "",
-    savedAt: value.savedAt || null
-  };
-}
-
-function saveReadPosition(linkId, scrollElement) {
-  const link = state.links.find((item) => item.id === linkId);
-  const payload = getReadPositionFromElement(scrollElement, link);
-  state.ui.readPositions[linkId] = payload;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  if (auth.isLoggedIn) {
-    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(state));
-  }
-  return payload;
-}
-
-function getReadPositionFromElement(scrollElement, link) {
-  const maxScrollableY = getScrollableHeight(scrollElement);
-  const scrollY = Math.max(0, Math.min(scrollElement.scrollTop, maxScrollableY));
-  const scrollProgress = maxScrollableY > 0 ? Math.round((scrollY / maxScrollableY) * 10000) / 100 : 0;
-  const textAnchor = extractTextAnchor(link?.description || "", scrollProgress);
-  return {
-    url: link?.url || "",
-    scrollY,
-    scrollProgress,
-    textAnchor,
-    savedAt: new Date().toISOString()
-  };
-}
-
-function extractTextAnchor(sourceText, scrollProgress) {
-  const normalized = String(sourceText || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return "";
-  const centerIndex = Math.max(0, Math.min(normalized.length - 1, Math.floor((scrollProgress / 100) * normalized.length)));
-  const start = Math.max(0, centerIndex - 24);
-  const end = Math.min(normalized.length, centerIndex + 24);
-  return normalized.slice(start, end).trim();
-}
-
-function resolveRestoreScrollY(link, scrollElement, savedPosition) {
-  const maxScrollableY = getScrollableHeight(scrollElement);
-  if (!savedPosition) return 0;
-
-  // 1) textAnchor 매칭 복원
-  const source = String(link?.description || "").replace(/\s+/g, " ").trim();
-  const anchor = String(savedPosition.textAnchor || "").trim();
-  if (source && anchor) {
-    const index = source.indexOf(anchor);
-    if (index >= 0 && source.length > 0) {
-      const ratioFromAnchor = index / source.length;
-      return Math.max(0, Math.min(Math.round(ratioFromAnchor * maxScrollableY), maxScrollableY));
-    }
-  }
-
-  // 2) scrollProgress 복원
-  if (Number.isFinite(savedPosition.scrollProgress) && savedPosition.scrollProgress > 0) {
-    const byProgress = Math.round((savedPosition.scrollProgress / 100) * maxScrollableY);
-    return Math.max(0, Math.min(byProgress, maxScrollableY));
-  }
-
-  // 3) scrollY 복원
-  if (Number.isFinite(savedPosition.scrollY) && savedPosition.scrollY > 0) {
-    return Math.max(0, Math.min(savedPosition.scrollY, maxScrollableY));
-  }
-
-  return 0;
 }
 
 function isDisallowedLocalFileUrl(url) {
@@ -2074,14 +3745,14 @@ function openLinkForReading(link) {
   if (isPdfUrl(link.url)) {
     openPdfViewer(link.id, false);
   } else {
-    openReader(link.id, false);
+    continueOnOriginal(link);
   }
 }
 
 function saveAndRender() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeStateForStorage(state)));
   if (auth.isLoggedIn) {
-    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(state));
+    localStorage.setItem(cloudStorageKey(auth.userId), JSON.stringify(serializeStateForStorage(state)));
   }
   render();
 }
@@ -2129,7 +3800,15 @@ function escapeAttr(text) {
   return escapeHtml(text);
 }
 
+function resumePendingSnapshots() {
+  for (const link of state.links) {
+    if (isPdfUrl(link.url)) continue;
+    migrateLegacyToSnapshot(link);
+  }
+}
+
 async function bootApp() {
+  installReadingSessionListeners();
   if (bootOAuthToken) {
     try {
       await completeNaverLogin(bootOAuthToken);
@@ -2144,9 +3823,8 @@ async function bootApp() {
     if (selected?.categoryId) state.ui.selectedCategoryId = selected.categoryId;
     history.replaceState(null, "", window.location.pathname);
   }
-  bindReaderOverlayEvents();
-  openReaderFromHash();
   render();
+  resumePendingSnapshots();
 }
 
 bootApp();

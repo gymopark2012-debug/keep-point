@@ -3,8 +3,9 @@
   const HIGHLIGHT_WIDTH = 22;
 
   const IDB_NAME = "keepPointDB";
-  const IDB_VERSION = 1;
+  const IDB_VERSION = 2;
   const IDB_STORE = "localPdfs";
+  const IDB_SNAPSHOT_STORE = "snapshots";
 
   function idbOpen() {
     return new Promise((resolve, reject) => {
@@ -15,6 +16,9 @@
         const db = e.target.result;
         if (!db.objectStoreNames.contains(IDB_STORE)) {
           db.createObjectStore(IDB_STORE, { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains(IDB_SNAPSHOT_STORE)) {
+          db.createObjectStore(IDB_SNAPSHOT_STORE, { keyPath: "id" });
         }
       };
     });
@@ -595,18 +599,29 @@
   prevPage.addEventListener("click", () => goToPage(-1));
   nextPage.addEventListener("click", () => goToPage(1));
 
-  async function openPdfDocument() {
-    const opts = { url: pdfSrc, withCredentials: false, disableRange: true, disableStream: true };
-    try {
-      const task = pdfjsLib.getDocument(opts);
-      return await task.promise;
-    } catch {
-      const res = await fetch(pdfSrc, { mode: "cors", credentials: "omit" });
-      if (!res.ok) throw new Error(`PDF fetch HTTP ${res.status}`);
-      const buf = await res.arrayBuffer();
-      const task2 = pdfjsLib.getDocument({ data: buf });
-      return await task2.promise;
+  async function loadPdfArrayBuffer() {
+    if (localIdMode) {
+      const res = await fetch(pdfSrc);
+      if (!res.ok) throw new Error(`로컬 PDF를 불러오지 못했습니다. (${res.status})`);
+      return res.arrayBuffer();
     }
+
+    if (looksLikeHttpUrl(pdfSrc)) {
+      const proxyUrl = `/api/pdf/fetch?url=${encodeURIComponent(pdfSrc)}`;
+      const proxyRes = await fetch(proxyUrl);
+      if (proxyRes.ok) {
+        return proxyRes.arrayBuffer();
+      }
+    }
+
+    const res = await fetch(pdfSrc, { credentials: "omit" });
+    if (!res.ok) throw new Error(`PDF fetch HTTP ${res.status}`);
+    return res.arrayBuffer();
+  }
+
+  async function openPdfDocument() {
+    const data = await loadPdfArrayBuffer();
+    return pdfjsLib.getDocument({ data }).promise;
   }
 
   if (typeof pdfjsLib === "undefined") {

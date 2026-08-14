@@ -17,9 +17,9 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
+      <div class="brand">
         <h1>KeepPoint</h1>
-        <p>URL만 붙여넣으면 기억 포인트가 자동으로 남아요</p>
+        <p>읽던 곳에서 바로 이어보세요.</p>
       </div>
       <div class="topbar-auth">
         <div class="profile-chip" id="profileName">게스트</div>
@@ -28,52 +28,56 @@
       </div>
     </header>
 
-    <section class="tabs-wrap">
-      <div id="categoryTabs" class="tabs"></div>
-      <div class="tabs-actions">
-        <button id="addCategoryBtn" class="btn ghost">카테고리 추가</button>
-        <button id="deleteCategoryBtn" class="btn danger ghost">선택 카테고리 삭제</button>
-      </div>
-    </section>
+    <main class="home" id="homeView">
+      <section class="home-section continue-section" aria-label="이어서 읽기">
+        <div id="continueCard" class="continue-card continue-card--empty">
+          <p class="continue-empty">아직 읽던 자료가 없습니다. 아래에서 새 자료를 추가해 보세요.</p>
+        </div>
+      </section>
 
-    <main class="layout">
-      <section class="panel middle">
-        <h2>최근 기억 포인트</h2>
-        <ol id="recentList" class="recent-list"></ol>
-
-        <div class="quick-add">
-          <label for="quickAddInput">빠른 링크 추가</label>
-          <div class="quick-add-row">
-            <input id="quickAddInput" placeholder="링크 붙여넣으면 자동 저장..." />
-            <button type="button" class="btn" id="quickAddBtn">추가</button>
+      <section class="home-section add-section" aria-label="새 자료 추가">
+        <h2 class="section-title">새 자료 추가</h2>
+        <div class="add-box add-box--compact">
+          <div class="add-inline">
+            <span class="add-prefix" aria-hidden="true">🔗</span>
+            <input id="quickAddInput" type="url" placeholder="URL을 붙여넣으세요" aria-label="URL 붙여넣기" />
+            <button type="button" class="btn" id="quickAddBtn">저장</button>
+            <span class="add-sep" aria-hidden="true">|</span>
+            <input type="file" id="pdfFileInput" accept="application/pdf" hidden />
+            <button type="button" id="pickPdfBtn" class="btn ghost pdf-pick-btn">📄 PDF 불러오기</button>
           </div>
         </div>
-
-        <div class="quick-add pdf-upload-row">
-          <input type="file" id="pdfFileInput" accept="application/pdf" hidden />
-          <button type="button" id="pickPdfBtn" class="btn ghost">내 PDF 열기</button>
-        </div>
-
-        <div class="section-header">
-          <h2 id="localPdfCategoryTitle">내 PC PDF</h2>
-        </div>
-        <ul id="localPdfList" class="list"></ul>
-
-        <div class="section-header">
-          <h2 id="currentCategoryTitle">링크 목록</h2>
-        </div>
-        <ul id="linkList" class="list"></ul>
       </section>
 
-      <section class="panel right">
-        <div class="section-header">
-          <h2>기억 포인트</h2>
+      <section class="home-section library-section" aria-label="내 자료">
+        <div class="section-header library-header">
+          <h2 class="section-title">내 자료</h2>
+          <div class="more-wrap">
+            <button type="button" class="more-btn" id="libraryMoreBtn" aria-label="카테고리 관리" aria-expanded="false" aria-haspopup="true">⋯</button>
+            <div class="more-menu hidden" id="libraryMoreMenu" role="menu">
+              <button type="button" role="menuitem" id="addCategoryBtn">카테고리 추가</button>
+              <button type="button" role="menuitem" class="danger" id="deleteCategoryBtn">선택 카테고리 삭제</button>
+            </div>
+          </div>
         </div>
-        <article id="detailView" class="detail empty">
-          링크를 저장하면 기억 포인트가 여기에 나타납니다.
-        </article>
+        <div id="categoryTabs" class="tabs"></div>
+        <h2 id="localPdfCategoryTitle" class="visually-hidden">내 PC PDF</h2>
+        <ul id="localPdfList" class="library-list"></ul>
+        <h2 id="currentCategoryTitle" class="visually-hidden">링크 목록</h2>
+        <ul id="linkList" class="library-list"></ul>
+        <ol id="recentList" class="visually-hidden" hidden></ol>
       </section>
     </main>
+
+    <aside id="detailPanel" class="detail-panel" hidden aria-hidden="true">
+      <div class="detail-panel-bar">
+        <button type="button" class="btn ghost" id="closeDetailBtn">← 목록</button>
+        <span class="detail-panel-label">상세</span>
+      </div>
+      <article id="detailView" class="detail empty">
+        링크를 저장하면 기억 포인트가 여기에 나타납니다.
+      </article>
+    </aside>
 
     <dialog id="categoryModal">
       <form method="dialog" id="categoryForm">
@@ -85,6 +89,38 @@
         <menu>
           <button type="submit" value="cancel" formnovalidate>취소</button>
           <button type="submit" id="saveCategoryBtn" value="default">완료</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="positionSaveModal" class="auth-dialog position-save-dialog">
+      <form method="dialog" id="positionSaveForm">
+        <h3>읽던 위치를 저장하세요</h3>
+        <p class="meta position-save-target" id="positionSaveTargetText"></p>
+
+        <div id="positionSaveGuideDetailed" class="position-save-guide">
+          <ol class="position-save-steps">
+            <li>마지막으로 읽은 문장을 드래그하세요.</li>
+            <li>우클릭 → <strong>선택한 텍스트로 연결되는 링크 복사</strong></li>
+            <li>KeepPoint로 돌아와 아래에 붙여넣으세요.</li>
+          </ol>
+        </div>
+        <div id="positionSaveGuideCompact" class="position-save-guide position-save-guide--compact hidden">
+          <p>문장 드래그 → 우클릭 → <strong>선택한 텍스트로 연결되는 링크 복사</strong> → 붙여넣기</p>
+          <button type="button" class="auth-setup-link" id="positionSaveShowGuideBtn">자세한 방법 보기</button>
+        </div>
+
+        <button type="button" class="btn position-save-open-btn" id="positionSaveOpenSiteBtn">웹사이트 열기</button>
+
+        <label class="position-save-label">
+          복사한 링크를 붙여넣으세요
+          <input id="positionSaveInput" type="url" placeholder="https://…#:~:text=…" autocomplete="off" />
+        </label>
+        <p id="positionSaveError" class="auth-error hidden" role="alert"></p>
+
+        <menu>
+          <button type="submit" value="cancel" formnovalidate>취소</button>
+          <button type="button" class="btn" id="positionSaveSubmitBtn">위치 저장</button>
         </menu>
       </form>
     </dialog>

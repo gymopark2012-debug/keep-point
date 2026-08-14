@@ -1643,23 +1643,17 @@ function renderMemoryPointsPanel(link) {
       ${
         checkpointText
           ? `<p class="checkpoint-quote">「${escapeHtml(shortText(checkpointText, 120))}」</p>`
-          : `<p class="checkpoint-empty">아직 저장된 위치가 없습니다. 원문에서 문장을 선택한 뒤 「선택한 텍스트로 링크 복사」한 URL을 업데이트하세요.</p>`
+          : `<p class="checkpoint-empty">아직 저장된 위치가 없습니다. 「읽던 위치 저장」으로 마지막으로 읽은 문장을 남겨 두세요.</p>`
       }
       <p class="checkpoint-updated">마지막 업데이트 · ${escapeHtml(formatCheckpointUpdatedAt(link))}</p>
       <div class="checkpoint-actions">
         <button type="button" class="btn checkpoint-continue-btn" id="continueCheckpointBtn">${
-          isReading ? "계속 읽기 (다시 열기)" : "계속 읽기"
+          isReading ? "계속 읽기 (다시 열기)" : "이어서 읽기 →"
         }</button>
-        <button type="button" class="btn ghost" id="openFromStartBtn">처음부터 보기</button>
-        <button type="button" class="btn ghost" id="updateCheckpointBtn">새 위치 업데이트</button>
-      </div>
-      <div class="checkpoint-update-row" id="checkpointUpdateRow" hidden>
-        <input type="url" id="checkpointUpdateInput" class="checkpoint-update-input" placeholder="선택한 텍스트로 링크 복사한 URL 붙여넣기" aria-label="새 체크포인트 URL" />
-        <div class="checkpoint-update-actions">
-          <button type="button" class="btn sm" id="checkpointUpdateSave">저장</button>
-          <button type="button" class="btn ghost sm" id="checkpointUpdateCancel">취소</button>
+        <div class="checkpoint-secondary-actions">
+          <button type="button" class="btn ghost sm" id="openFromStartBtn">처음부터 읽기</button>
+          <button type="button" class="btn ghost sm" id="updateCheckpointBtn">읽던 위치 저장</button>
         </div>
-        <p class="checkpoint-update-hint">같은 페이지의 Text Fragment URL만 이 카드의 위치로 갱신됩니다.</p>
       </div>
       ${
         hasCheckpoint && link.checkpointHistory?.length
@@ -1679,6 +1673,13 @@ function renderMemoryPointsPanel(link) {
             </details>`
           : ""
       }
+      <details class="detail-manage">
+        <summary>⋯ 관리</summary>
+        <div class="detail-manage-menu">
+          <button type="button" class="btn ghost" id="shareCurrentBtn">공유</button>
+          <button type="button" class="btn danger" id="deleteCurrentBtn">삭제</button>
+        </div>
+      </details>
     </section>`;
 
   return `
@@ -1738,22 +1739,22 @@ function openFromBeginning(link) {
   saveAndRender();
 }
 
-async function applyCheckpointUpdateFromInput(link, rawUrl) {
+async function applyCheckpointUpdateFromInput(link, rawUrl, { select = true, quiet = false } = {}) {
   const parsed = normalizeUrl(String(rawUrl || "").trim());
   if (!parsed) {
-    alert("올바른 링크를 붙여넣어 주세요.");
+    if (!quiet) alert("올바른 링크를 붙여넣어 주세요.");
     return false;
   }
   const fragment = parseTextFragmentFromUrl(parsed);
   if (!fragment.hasFragment) {
-    alert("「선택한 텍스트로 링크 복사」로 만든 Text Fragment URL을 붙여넣어 주세요.");
+    if (!quiet) alert("「선택한 텍스트로 링크 복사」로 만든 Text Fragment URL을 붙여넣어 주세요.");
     return false;
   }
   if (getCanonicalPageKey(parsed) !== getCanonicalPageKey(getOriginalUrl(link))) {
-    alert("같은 페이지의 위치 링크만 이 카드에 업데이트할 수 있습니다.");
+    if (!quiet) alert("같은 페이지의 위치 링크만 이 카드에 업데이트할 수 있습니다.");
     return false;
   }
-  updateLinkCheckpoint(link, parsed);
+  updateLinkCheckpoint(link, parsed, { select });
   saveAndRender();
   return true;
 }
@@ -1781,50 +1782,10 @@ function bindWebLinkDetailEvents(root, link) {
     if (current) openFromBeginning(current);
   });
 
-  on(root.querySelector("#updateCheckpointBtn"), "click", async (event) => {
+  on(root.querySelector("#updateCheckpointBtn"), "click", (event) => {
     event.stopPropagation();
     const current = getCurrent();
-    if (!current) return;
-    const row = root.querySelector("#checkpointUpdateRow");
-    const input = root.querySelector("#checkpointUpdateInput");
-
-    try {
-      if (navigator.clipboard?.readText) {
-        const clip = String(await navigator.clipboard.readText()).trim();
-        if (clip && parseTextFragmentFromUrl(clip).hasFragment) {
-          const ok = await applyCheckpointUpdateFromInput(current, clip);
-          if (ok) return;
-        }
-      }
-    } catch {
-      /* fall through to manual paste */
-    }
-
-    if (row) row.hidden = false;
-    if (input) {
-      input.value = "";
-      input.focus();
-    }
-  });
-
-  on(root.querySelector("#checkpointUpdateSave"), "click", async (event) => {
-    event.stopPropagation();
-    const current = getCurrent();
-    const input = root.querySelector("#checkpointUpdateInput");
-    if (!current || !input) return;
-    await applyCheckpointUpdateFromInput(current, input.value);
-  });
-
-  on(root.querySelector("#checkpointUpdateCancel"), "click", (event) => {
-    event.stopPropagation();
-    const row = root.querySelector("#checkpointUpdateRow");
-    if (row) row.hidden = true;
-  });
-
-  on(root.querySelector("#checkpointUpdateInput"), "keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    root.querySelector("#checkpointUpdateSave")?.click();
+    if (current) openPositionSaveModal(current, { select: true });
   });
 
   root.querySelectorAll("[data-history-url]").forEach((btn) => {
@@ -2236,11 +2197,11 @@ function updateLinkCheckpoint(link, checkpointUrl, { select = true } = {}) {
   link.checkpointUrl = parsed.checkpointUrl;
   link.checkpointText = parsed.text || link.checkpointText || "";
   link.checkpointUpdatedAt = new Date().toISOString();
-  link.lastVisitedAt = link.checkpointUpdatedAt;
   link.originalUrl = stripTextFragment(checkpointUrl) || link.originalUrl;
   link.url = link.originalUrl;
 
   if (select) {
+    link.lastVisitedAt = link.checkpointUpdatedAt;
     state.ui.selectedLinkId = link.id;
     if (link.categoryId) state.ui.selectedCategoryId = link.categoryId;
   }
@@ -2546,10 +2507,13 @@ let teardownDetailView = () => {};
 
 const categoryTabs = document.getElementById("categoryTabs");
 const recentList = document.getElementById("recentList");
+const continueCard = document.getElementById("continueCard");
 const linkList = document.getElementById("linkList");
 const localPdfList = document.getElementById("localPdfList");
 const localPdfCategoryTitle = document.getElementById("localPdfCategoryTitle");
+const detailPanel = document.getElementById("detailPanel");
 const detailView = document.getElementById("detailView");
+const closeDetailBtn = document.getElementById("closeDetailBtn");
 const currentCategoryTitle = document.getElementById("currentCategoryTitle");
 const profileName = document.getElementById("profileName");
 const openLoginBtn = document.getElementById("openLoginBtn");
@@ -2585,21 +2549,86 @@ const profileEmailInput = document.getElementById("profileEmailInput");
 const profileProviderInput = document.getElementById("profileProviderInput");
 const deleteAccountBtn = document.getElementById("deleteAccountBtn");
 let authModalMode = "login";
+let detailPanelOpen = false;
 const guestNotice = document.getElementById("guestNotice");
 const syncAcrossDevicesBtn = document.getElementById("syncAcrossDevicesBtn");
 const connectExtensionBtn = document.getElementById("connectExtensionBtn");
 const saveAiSummaryBtn = document.getElementById("saveAiSummaryBtn");
 const createShareLinkBtn = document.getElementById("createShareLinkBtn");
+const libraryMoreBtn = document.getElementById("libraryMoreBtn");
+const libraryMoreMenu = document.getElementById("libraryMoreMenu");
 
 const addCategoryBtn = document.getElementById("addCategoryBtn");
 const deleteCategoryBtn = document.getElementById("deleteCategoryBtn");
+
+function closeAllMoreMenus() {
+  document.querySelectorAll(".more-menu").forEach((menu) => menu.classList.add("hidden"));
+  if (libraryMoreBtn) libraryMoreBtn.setAttribute("aria-expanded", "false");
+}
+
+function openDetailPanel() {
+  detailPanelOpen = true;
+  if (!detailPanel) return;
+  detailPanel.hidden = false;
+  detailPanel.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+}
+
+function closeDetailPanel() {
+  detailPanelOpen = false;
+  if (!detailPanel) return;
+  detailPanel.hidden = true;
+  detailPanel.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+}
+
+function syncDetailPanelVisibility() {
+  if (detailPanelOpen && state.ui.selectedLinkId) openDetailPanel();
+  else closeDetailPanel();
+}
+
+if (closeDetailBtn) closeDetailBtn.addEventListener("click", () => {
+  closeDetailPanel();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && detailPanelOpen && !document.querySelector("dialog[open]")) {
+    closeDetailPanel();
+  }
+});
+
+if (libraryMoreBtn && libraryMoreMenu) {
+  libraryMoreBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = libraryMoreMenu.classList.contains("hidden");
+    closeAllMoreMenus();
+    if (willOpen) {
+      libraryMoreMenu.classList.remove("hidden");
+      libraryMoreBtn.setAttribute("aria-expanded", "true");
+    }
+  });
+}
+
+document.addEventListener("click", (event) => {
+  if (event.target.closest(".more-wrap") || event.target.closest(".item-menu-btn") || event.target.closest(".more-menu")) {
+    return;
+  }
+  closeAllMoreMenus();
+});
+
 if (addCategoryBtn) {
   addCategoryBtn.addEventListener("click", () => {
+    closeAllMoreMenus();
     if (categoryNameInput) categoryNameInput.value = "";
     categoryModal?.showModal();
   });
 }
-if (deleteCategoryBtn) deleteCategoryBtn.addEventListener("click", deleteSelectedCategory);
+if (deleteCategoryBtn) {
+  deleteCategoryBtn.addEventListener("click", () => {
+    closeAllMoreMenus();
+    deleteSelectedCategory();
+  });
+}
 if (categoryForm) categoryForm.addEventListener("submit", onCategoryFormSubmit);
 if (openLoginBtn) openLoginBtn.addEventListener("click", () => openLoginModal("manual"));
 if (openProfileBtn) openProfileBtn.addEventListener("click", openProfileModal);
@@ -2634,6 +2663,87 @@ if (pickPdfBtn && pdfFileInput) {
   pickPdfBtn.addEventListener("click", () => pdfFileInput.click());
   pdfFileInput.addEventListener("change", onPdfFileSelected);
 }
+
+const positionSaveModal = document.getElementById("positionSaveModal");
+const positionSaveForm = document.getElementById("positionSaveForm");
+const positionSaveInput = document.getElementById("positionSaveInput");
+const positionSaveSubmitBtn = document.getElementById("positionSaveSubmitBtn");
+const positionSaveOpenSiteBtn = document.getElementById("positionSaveOpenSiteBtn");
+const positionSaveShowGuideBtn = document.getElementById("positionSaveShowGuideBtn");
+
+if (positionSaveOpenSiteBtn) {
+  positionSaveOpenSiteBtn.addEventListener("click", () => {
+    if (!positionSaveTarget) return;
+    const link = state.links.find((item) => item.id === positionSaveTarget.linkId);
+    if (!link) return;
+    const url = normalizeUrl(getOriginalUrl(link));
+    if (!url) {
+      alert("원본 URL이 없습니다.");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  });
+}
+if (positionSaveSubmitBtn) {
+  positionSaveSubmitBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    void submitPositionSaveModal();
+  });
+}
+if (positionSaveInput) {
+  positionSaveInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void submitPositionSaveModal();
+  });
+  positionSaveInput.addEventListener("paste", () => {
+    setTimeout(() => setPositionSaveError(""), 0);
+  });
+}
+if (positionSaveShowGuideBtn) {
+  positionSaveShowGuideBtn.addEventListener("click", () => {
+    syncPositionSaveGuideMode(true);
+  });
+}
+if (positionSaveForm) {
+  positionSaveForm.addEventListener("submit", (event) => {
+    // Cancel / dialog close only. Save is handled by the primary button.
+    if (event.submitter && event.submitter.value !== "cancel") {
+      event.preventDefault();
+    }
+  });
+}
+async function tryPrefillPositionSaveFromClipboard() {
+  const input = document.getElementById("positionSaveInput");
+  if (!input || input.value.trim()) return;
+  try {
+    if (!navigator.clipboard?.readText) return;
+    const clip = String(await navigator.clipboard.readText()).trim();
+    if (clip && parseTextFragmentFromUrl(clip).hasFragment) {
+      input.value = clip;
+      input.focus();
+      input.select();
+      setPositionSaveError("");
+    }
+  } catch {
+    /* clipboard unavailable */
+  }
+}
+
+if (positionSaveModal) {
+  positionSaveModal.addEventListener("close", () => {
+    positionSaveTarget = null;
+    setPositionSaveError("");
+  });
+}
+window.addEventListener("focus", () => {
+  if (positionSaveModal?.open) void tryPrefillPositionSaveFromClipboard();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && positionSaveModal?.open) {
+    void tryPrefillPositionSaveFromClipboard();
+  }
+});
 
 function requireLoginFor(reason) {
   if (auth.isLoggedIn) return true;
@@ -2996,7 +3106,7 @@ async function addQuickLinkFromInput() {
   const parsed = normalizeUrl(rawUrl);
   if (!parsed) {
     if (/file:/i.test(rawUrl)) {
-      alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
+      alert("로컬 PDF는 「PDF 불러오기」를 사용해 주세요.");
     } else {
       alert("올바른 링크를 붙여넣어 주세요.");
     }
@@ -3027,6 +3137,7 @@ async function addQuickLinkFromInput() {
           existing.lastVisitedAt = new Date().toISOString();
         }
         quickAddInput.value = "";
+        detailPanelOpen = true;
         saveAndRender();
         return;
       }
@@ -3160,53 +3271,338 @@ function render() {
       : "지금까지는 이 브라우저에만 저장돼요. 로그인하면 다른 기기에서도 이어 읽을 수 있어요.";
   }
   renderTabs();
+  renderContinueCard();
   renderRecent();
   renderLocalPdfList();
   renderLinks();
   void renderDetail();
+  syncDetailPanelVisibility();
 }
 
 function renderTabs() {
+  if (!categoryTabs) return;
   categoryTabs.innerHTML = "";
   const tabs = [{ id: ALL_CATEGORY, name: "전체" }, ...state.categories];
   for (const tab of tabs) {
     const button = document.createElement("button");
+    button.type = "button";
     button.className = "tab";
     if (tab.id === state.ui.selectedCategoryId) button.classList.add("active");
     button.textContent = tab.name;
     button.addEventListener("click", () => {
       state.ui.selectedCategoryId = tab.id;
-      const first = getVisibleLinks()[0];
-      state.ui.selectedLinkId = first?.id || null;
       state.ui.expandedDescription = false;
+      closeDetailPanel();
       saveAndRender();
     });
     categoryTabs.appendChild(button);
   }
 }
 
-function renderRecent() {
-  recentList.innerHTML = "";
-  const recent = [...state.links]
-    .filter((link) => !isPdfUrl(link.url))
-    .sort((a, b) => new Date(b.lastVisitedAt || 0) - new Date(a.lastVisitedAt || 0))
-    .slice(0, 5);
+function getMostRecentResumeItem() {
+  const linkCandidates = (state.links || []).map((link) => ({
+    kind: "link",
+    id: link.id,
+    at: getLinkActivityMs(link) || new Date(link.lastVisitedAt || link.savedAt || 0).getTime() || 0,
+    link
+  }));
+  const pdfCandidates = (state.localPdfs || []).map((item) => ({
+    kind: "localPdf",
+    id: item.id,
+    at: new Date(item.addedAt || 0).getTime() || 0,
+    item
+  }));
+  return [...linkCandidates, ...pdfCandidates].sort((a, b) => b.at - a.at)[0] || null;
+}
 
-  if (!recent.length) {
-    recentList.innerHTML = "<li class='muted'>아직 저장된 링크가 없습니다.</li>";
+function getPdfPageLabel(pageNumber) {
+  const page = Math.max(1, Number.parseInt(String(pageNumber), 10) || 1);
+  return `${page}쪽까지 읽음`;
+}
+
+function getLibraryLineForLocalPdf(item) {
+  const lastPage = getLocalPdfLastPage(item.id);
+  return `📄 PDF · ${getPdfPageLabel(lastPage)}`;
+}
+
+function getLibraryLineForLink(link) {
+  if (isPdfUrl(link.url)) {
+    const snap = getPdfSnapshotFromStorage(link.url);
+    const page = snap?.pageNumber != null ? getPdfPageLabel(snap.pageNumber) : "페이지 기록 없음";
+    return `📄 PDF · ${page}`;
+  }
+  const source = getLinkSourceName(link);
+  if (getSavedResumeSentence(link)) return `🔗 ${source} · 읽던 문장 저장됨`;
+  return `🔗 ${source}`;
+}
+
+function getSavedResumeSentence(link) {
+  if (!link || isPdfUrl(link.url)) return "";
+  const checkpoint = String(getCheckpointSnippet(link) || "").trim();
+  if (checkpoint) return checkpoint;
+  // Fallback: older data may keep the last sentence only in description.
+  const desc = String(link.description || "").trim();
+  if (desc && desc.length >= 8 && desc.length <= 220) return desc;
+  return "";
+}
+
+function getLinkResumeHint(link) {
+  if (isPdfUrl(link.url)) {
+    const snap = getPdfSnapshotFromStorage(link.url);
+    if (snap?.pageNumber != null) return getPdfPageLabel(snap.pageNumber);
+    return "페이지 기록 없음";
+  }
+  const sentence = getSavedResumeSentence(link);
+  if (sentence) return shortText(sentence, 120);
+  return "";
+}
+
+function renderContinueSpotHtml({ isPdf, pageLabel, quote, emptyText }) {
+  if (isPdf) {
+    return `
+      <div class="continue-spot">
+        <p class="continue-spot-label">마지막으로 읽은 곳</p>
+        <p class="continue-page">${escapeHtml(pageLabel)}</p>
+      </div>`;
+  }
+  if (quote) {
+    return `
+      <div class="continue-spot">
+        <p class="continue-spot-label">마지막으로 읽은 곳</p>
+        <p class="continue-quote">“${escapeHtml(quote)}”</p>
+      </div>`;
+  }
+  return `
+    <div class="continue-spot">
+      <p class="continue-spot-label">마지막으로 읽은 곳</p>
+      <p class="continue-spot-empty">${escapeHtml(emptyText || "아직 저장된 읽기 위치가 없습니다.")}</p>
+    </div>`;
+}
+
+const POSITION_GUIDE_KEY = "keepPoint_positionSaveGuideCompact";
+let positionSaveTarget = null;
+
+function hasUsedPositionSaveBefore() {
+  try {
+    if (localStorage.getItem(POSITION_GUIDE_KEY) === "1") return true;
+  } catch {
+    /* ignore */
+  }
+  return (state.links || []).some((link) => !isPdfUrl(link.url) && Boolean(getCheckpointSnippet(link)));
+}
+
+function markPositionSaveGuideCompact() {
+  try {
+    localStorage.setItem(POSITION_GUIDE_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
+
+function setPositionSaveError(message) {
+  const el = document.getElementById("positionSaveError");
+  if (!el) return;
+  if (!message) {
+    el.textContent = "";
+    el.classList.add("hidden");
+    return;
+  }
+  el.textContent = message;
+  el.classList.remove("hidden");
+}
+
+function syncPositionSaveGuideMode(forceDetailed = false) {
+  const detailed = document.getElementById("positionSaveGuideDetailed");
+  const compact = document.getElementById("positionSaveGuideCompact");
+  if (!detailed || !compact) return;
+  const useCompact = !forceDetailed && hasUsedPositionSaveBefore();
+  detailed.classList.toggle("hidden", useCompact);
+  compact.classList.toggle("hidden", !useCompact);
+}
+
+async function openPositionSaveModal(link, { select = true } = {}) {
+  if (!link || isPdfUrl(link.url)) return;
+  const modal = document.getElementById("positionSaveModal");
+  const input = document.getElementById("positionSaveInput");
+  const targetText = document.getElementById("positionSaveTargetText");
+  if (!modal || !input) return;
+
+  positionSaveTarget = { linkId: link.id, select: Boolean(select) };
+  if (targetText) {
+    targetText.textContent = `${link.title || "웹페이지"} · ${getLinkSourceName(link)}`;
+  }
+  setPositionSaveError("");
+  syncPositionSaveGuideMode(false);
+  input.value = "";
+
+  try {
+    if (navigator.clipboard?.readText) {
+      const clip = String(await navigator.clipboard.readText()).trim();
+      if (clip && parseTextFragmentFromUrl(clip).hasFragment) {
+        input.value = clip;
+      }
+    }
+  } catch {
+    /* clipboard unavailable */
+  }
+
+  if (!modal.open) modal.showModal();
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+}
+
+async function submitPositionSaveModal() {
+  if (!positionSaveTarget) return;
+  const link = state.links.find((item) => item.id === positionSaveTarget.linkId);
+  const input = document.getElementById("positionSaveInput");
+  const modal = document.getElementById("positionSaveModal");
+  if (!link || !input) return;
+
+  setPositionSaveError("");
+  const ok = await applyCheckpointUpdateFromInput(link, input.value, {
+    select: positionSaveTarget.select,
+    quiet: true
+  });
+  if (!ok) {
+    const raw = String(input.value || "").trim();
+    if (!raw) setPositionSaveError("복사한 링크를 붙여넣어 주세요.");
+    else if (!parseTextFragmentFromUrl(raw).hasFragment) {
+      setPositionSaveError("「선택한 텍스트로 연결되는 링크 복사」로 만든 링크를 붙여넣어 주세요.");
+    } else {
+      setPositionSaveError("같은 페이지의 위치 링크만 저장할 수 있습니다. 웹사이트를 연 뒤 다시 복사해 주세요.");
+    }
+    input.focus();
+    input.select();
+    return;
+  }
+  markPositionSaveGuideCompact();
+  positionSaveTarget = null;
+  if (modal?.open) modal.close();
+}
+
+function moveLinkToCategory(link) {
+  if (!link || isPdfUrl(link.url)) return;
+  const categories = state.categories || [];
+  if (!categories.length) {
+    alert("이동할 카테고리가 없습니다. 먼저 카테고리를 추가해 주세요.");
+    return;
+  }
+  const lines = categories.map((c, i) => `${i + 1}. ${c.name}${c.id === link.categoryId ? " (현재)" : ""}`).join("\n");
+  const answer = prompt(`이동할 카테고리 번호를 입력하세요.\n\n${lines}`, "");
+  if (answer == null) return;
+  const index = Number.parseInt(String(answer).trim(), 10) - 1;
+  const target = categories[index];
+  if (!target) {
+    alert("올바른 카테고리 번호를 입력해 주세요.");
+    return;
+  }
+  if (link.categoryId === target.id) return;
+  link.categoryId = target.id;
+  saveAndRender();
+}
+
+function bindWebContinueSecondaryActions(root, link) {
+  if (!root || !link || isPdfUrl(link.url)) return;
+  const fromStartBtn = root.querySelector("#continueFromStartBtn");
+  const updateBtn = root.querySelector("#continueUpdateCheckpointBtn");
+
+  fromStartBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openFromBeginning(link);
+  });
+
+  updateBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openPositionSaveModal(link, { select: true });
+  });
+}
+
+function renderWebContinueActionsHtml() {
+  return `
+    <button type="button" class="btn continue-cta" id="continueHeroBtn">이어서 읽기 →</button>
+    <div class="continue-secondary-actions">
+      <button type="button" class="btn ghost sm" id="continueFromStartBtn">처음부터 읽기</button>
+      <button type="button" class="btn ghost sm" id="continueUpdateCheckpointBtn">읽던 위치 저장</button>
+    </div>`;
+}
+
+function renderContinueCard() {
+  if (!continueCard) return;
+  const newest = getMostRecentResumeItem();
+  if (!newest) {
+    continueCard.className = "continue-card continue-card--empty";
+    continueCard.innerHTML = `<p class="continue-empty">아직 읽던 자료가 없습니다. 아래에서 새 자료를 추가해 보세요.</p>`;
     return;
   }
 
-  for (const link of recent) {
-    const li = document.createElement("li");
-    const hint = getContextHint(link);
-    li.innerHTML = `<strong>${escapeHtml(shortText(hint, 40))}</strong><span class="recent-resume">${escapeHtml(shortText(link.title, 36))}</span>`;
-    li.addEventListener("click", () => {
-      state.ui.selectedCategoryId = link.categoryId;
-      selectLink(link.id);
-    });
-    recentList.appendChild(li);
+  continueCard.className = "continue-card";
+  if (newest.kind === "localPdf") {
+    const item = newest.item;
+    const lastPage = getLocalPdfLastPage(item.id);
+    const when = formatVisitWhen(item.addedAt) || relativeTime(item.addedAt);
+    continueCard.innerHTML = `
+      <p class="continue-kicker">이어서 읽기</p>
+      <h2 class="continue-title">${escapeHtml(item.title || item.fileName)}</h2>
+      <div class="continue-meta-row">
+        <p class="continue-source">📄 PDF</p>
+        <p class="continue-time">${escapeHtml(when)}</p>
+      </div>
+      ${renderContinueSpotHtml({ isPdf: true, pageLabel: getPdfPageLabel(lastPage) })}
+      <button type="button" class="btn continue-cta" id="continueHeroBtn">이어서 읽기 →</button>
+    `;
+    continueCard.querySelector("#continueHeroBtn")?.addEventListener("click", () => openLocalPdfViewer(item.id));
+    return;
   }
+
+  const link = newest.link;
+  const isPdf = isPdfUrl(link.url);
+  const when = formatVisitWhen(getLinkActivityAt(link) || link.lastVisitedAt || link.savedAt) || relativeTime(link.lastVisitedAt);
+  const source = isPdf ? "📄 PDF" : `🔗 ${getLinkSourceName(link)}`;
+  const pageLabel = isPdf ? getLinkResumeHint(link) : "";
+  const quote = isPdf ? "" : getSavedResumeSentence(link);
+  continueCard.innerHTML = `
+    <p class="continue-kicker">이어서 읽기</p>
+    <h2 class="continue-title">${escapeHtml(link.title)}</h2>
+    <div class="continue-meta-row">
+      <p class="continue-source">${escapeHtml(source)}</p>
+      <p class="continue-time">${escapeHtml(when)}</p>
+    </div>
+    ${renderContinueSpotHtml({
+      isPdf,
+      pageLabel,
+      quote: quote ? shortText(quote, 140) : "",
+      emptyText: "아직 저장된 읽기 위치가 없습니다. 이어서 읽기를 누르면 원문으로 이동합니다."
+    })}
+    ${
+      isPdf
+        ? `<button type="button" class="btn continue-cta" id="continueHeroBtn">이어서 읽기 →</button>`
+        : renderWebContinueActionsHtml()
+    }
+  `;
+  continueCard.querySelector("#continueHeroBtn")?.addEventListener("click", () => {
+    if (isPdf) openPdfViewer(link.id, false);
+    else continueOnOriginal(link);
+  });
+  if (!isPdf) bindWebContinueSecondaryActions(continueCard, link);
+}
+
+function renderRecent() {
+  if (!recentList) return;
+  recentList.innerHTML = "";
+}
+
+function bindItemMoreMenu(li) {
+  const menuBtn = li.querySelector(".item-menu-btn");
+  const menu = li.querySelector(".more-menu");
+  if (!menuBtn || !menu) return;
+  menuBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = menu.classList.contains("hidden");
+    closeAllMoreMenus();
+    if (willOpen) menu.classList.remove("hidden");
+  });
 }
 
 function renderLocalPdfList() {
@@ -3220,118 +3616,197 @@ function renderLocalPdfList() {
   }
   const list = getVisibleLocalPdfs();
   if (!list.length) {
-    const empty = document.createElement("li");
-    empty.className = "local-pdf-empty";
-    empty.textContent = selectedCategory
-      ? `「${selectedCategory.name}」 카테고리에 저장된 PDF가 없습니다. 「내 PDF 열기」로 이 카테고리에 추가해 주세요.`
-      : "저장된 내 PC PDF가 없습니다. 카테고리를 선택한 뒤 「내 PDF 열기」로 파일을 추가해 주세요.";
-    localPdfList.appendChild(empty);
+    if (!getVisibleLinks().length) {
+      const empty = document.createElement("li");
+      empty.className = "local-pdf-empty";
+      empty.textContent = selectedCategory
+        ? `「${selectedCategory.name}」에 저장된 자료가 없습니다.`
+        : "저장된 자료가 없습니다. URL을 붙여넣거나 PDF를 불러와 보세요.";
+      localPdfList.appendChild(empty);
+    }
     return;
   }
   for (const item of list) {
-    const lastPage = getLocalPdfLastPage(item.id);
+    const when = formatVisitWhen(item.addedAt) || relativeTime(item.addedAt);
     const li = document.createElement("li");
-    li.className = "local-pdf-card";
+    li.className = "item";
     li.innerHTML = `
-      <div class="local-pdf-card-head">
-        <input type="text" class="local-pdf-title-input" value="${escapeHtml(item.title)}" aria-label="PDF 제목" />
-      </div>
-      <div class="meta">파일: ${escapeHtml(item.fileName)}</div>
-      <div class="meta">마지막 읽은 페이지: <strong>${lastPage}</strong>쪽</div>
-      <div class="local-pdf-card-actions">
-        <button type="button" class="btn" data-action="continue">이어 읽기</button>
-        <button type="button" class="btn danger" data-action="remove">삭제</button>
+      <h3 class="item-title">${escapeHtml(item.title || item.fileName)}</h3>
+      <p class="item-line">${escapeHtml(getLibraryLineForLocalPdf(item))}</p>
+      <p class="item-time">${escapeHtml(when)}</p>
+      <button type="button" class="item-menu-btn" aria-label="더보기">⋯</button>
+      <div class="more-menu hidden">
+        <button type="button" data-action="continue">이어서 읽기</button>
+        <button type="button" data-action="rename">제목 수정</button>
+        <button type="button" class="danger" data-action="remove">삭제</button>
       </div>
     `;
-    const titleInput = li.querySelector(".local-pdf-title-input");
-    titleInput.addEventListener("blur", () => {
-      const newTitle = titleInput.value.trim() || item.fileName;
-      if (newTitle === item.title) return;
-      item.title = newTitle;
-      idbGetLocalPdfRecord(item.id)
-        .then((rec) => {
-          if (rec) {
-            rec.title = newTitle;
-            return idbPutLocalPdfRecord(rec);
-          }
-        })
-        .catch(console.error);
-      saveAndRender();
-    });
-    li.querySelector('[data-action="continue"]').addEventListener("click", () => openLocalPdfViewer(item.id));
-    li.querySelector('[data-action="remove"]').addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteLocalPdf(item.id);
+    bindItemMoreMenu(li);
+    li.addEventListener("click", (event) => {
+      const action = event.target?.dataset?.action;
+      if (action === "continue") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        openLocalPdfViewer(item.id);
+        return;
+      }
+      if (action === "rename") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        const next = prompt("PDF 제목", item.title || item.fileName);
+        if (next == null) return;
+        const newTitle = next.trim() || item.fileName;
+        if (newTitle === item.title) return;
+        item.title = newTitle;
+        idbGetLocalPdfRecord(item.id)
+          .then((rec) => {
+            if (rec) {
+              rec.title = newTitle;
+              return idbPutLocalPdfRecord(rec);
+            }
+          })
+          .catch(console.error);
+        saveAndRender();
+        return;
+      }
+      if (action === "remove") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        deleteLocalPdf(item.id);
+        return;
+      }
+      if (event.target?.closest(".item-menu-btn") || event.target?.closest(".more-menu")) return;
+      openLocalPdfViewer(item.id);
     });
     localPdfList.appendChild(li);
   }
 }
 
 function renderLinks() {
+  if (!linkList) return;
   linkList.innerHTML = "";
   const selectedCategory = state.categories.find((c) => c.id === state.ui.selectedCategoryId);
-  currentCategoryTitle.textContent = selectedCategory ? `${selectedCategory.name} 링크` : "전체 링크";
+  if (currentCategoryTitle) {
+    currentCategoryTitle.textContent = selectedCategory ? `${selectedCategory.name} 링크` : "전체 링크";
+  }
+  const resumeItem = getMostRecentResumeItem();
+  const currentResumeLinkId = resumeItem?.kind === "link" ? resumeItem.id : null;
 
   for (const link of getVisibleLinks()) {
     const isPdf = isPdfUrl(link.url);
     const li = document.createElement("li");
-    li.className = "item";
-    if (link.id === state.ui.selectedLinkId) li.classList.add("active");
+    li.className = `item${isPdf ? "" : " item--web"}`;
+    if (currentResumeLinkId && link.id === currentResumeLinkId) li.classList.add("is-current");
+    if (detailPanelOpen && link.id === state.ui.selectedLinkId) li.classList.add("active");
+    const when = formatVisitWhen(getLinkActivityAt(link) || link.lastVisitedAt || link.savedAt) || relativeTime(link.lastVisitedAt);
 
     if (isPdf) {
       li.innerHTML = `
-        <div>${escapeHtml(link.title)}</div>
-        <div class="meta">PDF · ${escapeHtml(shortText(getOriginalUrl(link), 60))}</div>
-        <div class="hover-actions">
-          <button class="btn" data-action="continue">이어보기</button>
-          <button class="btn ghost" data-action="original">원본 보기</button>
-          <button class="btn ghost" data-action="share">공유</button>
-          <button class="btn danger" data-action="delete">삭제</button>
+        <h3 class="item-title">${escapeHtml(link.title)}</h3>
+        <p class="item-line">${escapeHtml(getLibraryLineForLink(link))}</p>
+        <p class="item-time">${escapeHtml(when)}</p>
+        <button type="button" class="item-menu-btn" aria-label="더보기">⋯</button>
+        <div class="more-menu hidden">
+          <button type="button" data-action="continue">이어서 읽기</button>
+          <button type="button" data-action="detail">상세 보기</button>
+          <button type="button" data-action="original">원본 보기</button>
+          <button type="button" data-action="share">공유</button>
+          <button type="button" class="danger" data-action="delete">삭제</button>
         </div>
       `;
     } else {
-      const hint = getContextHint(link);
       li.innerHTML = `
-        <div class="item-title">${escapeHtml(link.title)}</div>
-        <div class="meta item-source">${escapeHtml(getLinkSourceName(link))}</div>
-        <div class="item-resume-hint">${escapeHtml(shortText(hint, 56))}</div>
-        <div class="hover-actions">
-          <button class="btn" data-action="continue">계속 읽기</button>
-          <button class="btn ghost" data-action="share">공유</button>
-          <button class="btn danger" data-action="delete">삭제</button>
+        <div class="item-body">
+          <h3 class="item-title">${escapeHtml(link.title)}</h3>
+          <p class="item-line">${escapeHtml(getLibraryLineForLink(link))}</p>
+          <p class="item-time">${escapeHtml(when)}</p>
+          ${
+            currentResumeLinkId === link.id
+              ? `<span class="item-current-badge">현재 선택됨</span>`
+              : ""
+          }
+        </div>
+        <div class="item-quick-actions" aria-label="빠른 작업">
+          <button type="button" class="btn sm" data-action="continue">이어서 읽기</button>
+          <button type="button" class="btn ghost sm" data-action="update-checkpoint">읽던 위치 저장</button>
+        </div>
+        <button type="button" class="item-menu-btn" aria-label="더보기">⋯</button>
+        <div class="more-menu hidden">
+          <button type="button" data-action="continue" data-mobile-only="1">이어서 읽기</button>
+          <button type="button" data-action="from-start">처음부터 읽기</button>
+          <button type="button" data-action="update-checkpoint" data-mobile-only="1">읽던 위치 저장</button>
+          <button type="button" data-action="move-category">카테고리 이동</button>
+          <button type="button" data-action="detail">상세 보기</button>
+          <button type="button" data-action="share">공유</button>
+          <button type="button" class="danger" data-action="delete">삭제</button>
         </div>
       `;
     }
 
+    bindItemMoreMenu(li);
     li.addEventListener("click", (event) => {
       const action = event.target?.dataset?.action;
-      if (action === "save-position" || action === "mark-read") {
-        event.stopPropagation();
-        selectLink(link.id);
-        return;
-      }
+
       if (action === "continue") {
         event.stopPropagation();
-        continueOnOriginal(link);
+        closeAllMoreMenus();
+        if (isPdf) openPdfViewer(link.id, false);
+        else continueOnOriginal(link);
+        return;
+      }
+      if (action === "from-start") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        openFromBeginning(link);
+        return;
+      }
+      if (action === "update-checkpoint") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        if (!isPdf) openPositionSaveModal(link, { select: false });
+        return;
+      }
+      if (action === "move-category") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        moveLinkToCategory(link);
+        return;
+      }
+      if (action === "detail") {
+        event.stopPropagation();
+        closeAllMoreMenus();
+        selectLink(link.id, { openDetail: true });
         return;
       }
       if (action === "original") {
         event.stopPropagation();
+        closeAllMoreMenus();
         openOriginalUrl(link);
         return;
       }
       if (action === "share") {
         event.stopPropagation();
+        closeAllMoreMenus();
         shareLink(link.id);
         return;
       }
       if (action === "delete") {
         event.stopPropagation();
+        closeAllMoreMenus();
         deleteLink(link.id);
         return;
       }
-      selectLink(link.id);
+      if (
+        event.target?.closest(".item-menu-btn") ||
+        event.target?.closest(".more-menu") ||
+        event.target?.closest(".item-quick-actions")
+      ) {
+        return;
+      }
+      if (isPdf) openPdfViewer(link.id, false);
+      else continueOnOriginal(link);
     });
+
     linkList.appendChild(li);
   }
 }
@@ -3345,6 +3820,7 @@ async function renderDetail() {
     detailView.classList.add("empty");
     detailView.textContent = "링크를 저장하면 기억 포인트가 여기에 나타납니다.";
     teardownDetailView = () => {};
+    if (detailPanelOpen) closeDetailPanel();
     return;
   }
 
@@ -3364,14 +3840,26 @@ async function renderDetail() {
   const webPanelHtml = !isPdf ? renderWebLinkDetailPanel(link) : "";
 
   detailView.innerHTML = `
-    <div class="hover-actions">
-      <button class="btn ghost" id="shareCurrentBtn">공유</button>
-      <button class="btn danger" id="deleteCurrentBtn">삭제</button>
-    </div>
     ${isPdf
       ? `<h3>${escapeHtml(link.title)}</h3>
+         <p class="context-meta">PDF</p>
          <a href="${escapeAttr(getOriginalUrl(link))}" target="_blank" rel="noreferrer">원문 링크</a>
-         <div class="resume-card"><strong>PDF</strong><div>${pdfPageLine}</div><div class="resume-actions"><button type="button" class="btn" id="openPdfBtn">PDF 뷰어에서 열기</button><button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button><button type="button" class="btn danger" id="clearPdfBtn">PDF 읽기 위치 삭제</button></div></div>`
+         <div class="resume-card">
+           <strong>읽던 위치</strong>
+           <div>${pdfPageLine}</div>
+           <div class="resume-actions">
+             <button type="button" class="btn continue-cta" id="openPdfBtn">이어서 읽기 →</button>
+           </div>
+           <details class="detail-manage">
+             <summary>⋯ 관리</summary>
+             <div class="detail-manage-menu">
+               <button type="button" class="btn ghost" id="restartPdfBtn">처음부터 (1페이지)</button>
+               <button type="button" class="btn ghost" id="clearPdfBtn">PDF 읽기 위치 삭제</button>
+               <button type="button" class="btn ghost" id="shareCurrentBtn">공유</button>
+               <button type="button" class="btn danger" id="deleteCurrentBtn">삭제</button>
+             </div>
+           </details>
+         </div>`
       : webPanelHtml}
     ${isPdf
       ? `<div class="save-row">
@@ -3379,17 +3867,20 @@ async function renderDetail() {
     </div>`
       : ""}
     ${isPdf
-      ? `<label>
-          태그
-          <div id="selectedTags" class="tag-editor-list"></div>
-          <input id="newTagInput" placeholder="새 태그 입력 후 Enter" />
-          <div id="tagSuggestions" class="tag-suggestions"></div>
-        </label>
-        <label>
-          설명
-          <textarea id="editDescInput" rows="5">${escapeHtml(link.description || "")}</textarea>
-        </label>
-        <p class="meta">PC에 있는 PDF는 목록 위의 <strong>내 PDF 열기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>`
+      ? `<details class="detail-manage">
+          <summary>태그 · 설명</summary>
+          <label>
+            태그
+            <div id="selectedTags" class="tag-editor-list"></div>
+            <input id="newTagInput" placeholder="새 태그 입력 후 Enter" />
+            <div id="tagSuggestions" class="tag-suggestions"></div>
+          </label>
+          <label>
+            설명
+            <textarea id="editDescInput" rows="5">${escapeHtml(link.description || "")}</textarea>
+          </label>
+          <p class="meta">PC에 있는 PDF는 홈의 <strong>PDF 불러오기</strong>로 여세요. 아래는 링크로 연 PDF입니다.</p>
+        </details>`
       : ""}
   `;
 
@@ -3535,14 +4026,15 @@ async function renderDetail() {
   };
 }
 
-function selectLink(linkId) {
+function selectLink(linkId, { openDetail = true, touchVisit = false } = {}) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link) return;
   state.ui.selectedLinkId = linkId;
   state.ui.expandedDescription = false;
-  link.lastVisitedAt = new Date().toISOString();
+  if (touchVisit) link.lastVisitedAt = new Date().toISOString();
   const hunt = getHuntForLink(link);
   if (hunt) setActiveHunt(hunt.id);
+  if (openDetail) detailPanelOpen = true;
   saveAndRender();
 }
 
@@ -3725,7 +4217,7 @@ function openPdfViewer(linkId, restart) {
   const link = state.links.find((item) => item.id === linkId);
   if (!link || !isPdfUrl(link.url)) return;
   if (isDisallowedLocalFileUrl(link.url)) {
-    alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
+    alert("로컬 PDF는 「PDF 불러오기」를 사용해 주세요.");
     return;
   }
   window.location.href = pdfViewerPageUrl(link, restart);
@@ -3739,7 +4231,7 @@ function openWebLinkInNewTab(link) {
 
 function openLinkForReading(link) {
   if (isDisallowedLocalFileUrl(link.url)) {
-    alert("로컬 PDF는 「내 PDF 열기」를 사용해 주세요.");
+    alert("로컬 PDF는 「PDF 불러오기」를 사용해 주세요.");
     return;
   }
   if (isPdfUrl(link.url)) {

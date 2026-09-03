@@ -35,12 +35,33 @@
 
     <aside id="memoPanel" class="pv-memo-panel hidden">
       <h3>메모</h3>
-      <textarea id="memoEditor" rows="6" placeholder="이 위치에 남길 메모를 입력하세요."></textarea>
+      <textarea id="memoEditor" rows="6" placeholder="메모를 입력하면 자동으로 저장됩니다."></textarea>
       <div class="pv-memo-actions">
-        <button type="button" id="memoSaveBtn" class="btn">저장</button>
-        <button type="button" id="memoCancelBtn" class="btn ghost">취소</button>
+        <button type="button" id="memoDeleteBtn" class="btn danger ghost hidden">메모 삭제</button>
+        <button type="button" id="memoCloseBtn" class="btn">닫기</button>
       </div>
     </aside>
+
+    <div id="annPopup" class="pv-ann-popup hidden" role="menu">
+      <p id="annPopupNote" class="pv-ann-popup-note hidden"></p>
+      <div class="pv-ann-popup-row">
+        <button type="button" id="annPopupMemo" class="btn" role="menuitem">메모 추가</button>
+        <button type="button" id="annPopupDelete" class="pv-icon-btn" role="menuitem" title="삭제" aria-label="삭제">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6l-1 14H6L5 6"></path>
+            <path d="M10 11v6"></path>
+            <path d="M14 11v6"></path>
+            <path d="M9 6V4h6v2"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div id="undoToast" class="pv-toast hidden" role="status">
+      <span id="undoToastMsg"></span>
+      <button type="button" id="undoToastBtn" class="pv-toast-undo">실행 취소</button>
+    </div>
 
     <p id="pdfError" class="pv-error hidden"></p>
 

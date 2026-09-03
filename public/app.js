@@ -2629,6 +2629,9 @@ if (deleteCategoryBtn) {
     deleteSelectedCategory();
   });
 }
+document.getElementById("cancelCategoryBtn")?.addEventListener("click", () => {
+  categoryModal?.close();
+});
 if (categoryForm) categoryForm.addEventListener("submit", onCategoryFormSubmit);
 if (openLoginBtn) openLoginBtn.addEventListener("click", () => openLoginModal("manual"));
 if (openProfileBtn) openProfileBtn.addEventListener("click", openProfileModal);
@@ -3062,7 +3065,6 @@ function maybePromptLoginByLimit(previousCount) {
 }
 
 function onCategoryFormSubmit(event) {
-  if (event.submitter?.value === "cancel") return;
   event.preventDefault();
   const name = categoryNameInput.value.trim();
   if (!name) {
@@ -3184,10 +3186,14 @@ async function addQuickLinkFromInput() {
   }
 }
 
+function pdfViewerHref(searchParams) {
+  return new URL(`pdf-viewer.html?${searchParams.toString()}`, window.location.href).href;
+}
+
 function openLocalPdfViewer(id) {
   const qs = new URLSearchParams();
   qs.set("localId", id);
-  window.location.href = `/pdf-viewer.html?${qs.toString()}`;
+  window.location.href = pdfViewerHref(qs);
 }
 
 async function deleteLocalPdf(id) {
@@ -3215,9 +3221,22 @@ async function onPdfFileSelected() {
   const id = createId("p");
   const baseTitle = file.name.replace(/\.pdf$/i, "") || file.name;
   const createdAt = new Date().toISOString();
+  let blob;
+  try {
+    const bytes = await file.arrayBuffer();
+    if (!bytes || bytes.byteLength < 64) {
+      alert("PDF 파일을 읽지 못했습니다. 다른 파일을 선택해 주세요.");
+      return;
+    }
+    blob = new Blob([bytes], { type: "application/pdf" });
+  } catch (e) {
+    console.error(e);
+    alert("PDF 파일을 읽지 못했습니다. 파일이 다른 프로그램에서 열려 있는지 확인해 주세요.");
+    return;
+  }
   const record = {
     id,
-    blob: file,
+    blob,
     fileName: file.name,
     title: baseTitle,
     size: file.size,
@@ -3360,23 +3379,23 @@ function getLinkResumeHint(link) {
 function renderContinueSpotHtml({ isPdf, pageLabel, quote, emptyText }) {
   if (isPdf) {
     return `
-      <div class="continue-spot">
-        <p class="continue-spot-label">마지막으로 읽은 곳</p>
-        <p class="continue-page">${escapeHtml(pageLabel)}</p>
-      </div>`;
+      <p class="continue-spot">
+        <span class="continue-spot-label">마지막으로 읽은 곳</span>
+        <span class="continue-page">${escapeHtml(pageLabel)}</span>
+      </p>`;
   }
   if (quote) {
     return `
-      <div class="continue-spot">
-        <p class="continue-spot-label">마지막으로 읽은 곳</p>
-        <p class="continue-quote">“${escapeHtml(quote)}”</p>
-      </div>`;
+      <p class="continue-spot">
+        <span class="continue-spot-label">마지막으로 읽은 곳</span>
+        <span class="continue-quote">“${escapeHtml(quote)}”</span>
+      </p>`;
   }
   return `
-    <div class="continue-spot">
-      <p class="continue-spot-label">마지막으로 읽은 곳</p>
-      <p class="continue-spot-empty">${escapeHtml(emptyText || "아직 저장된 읽기 위치가 없습니다.")}</p>
-    </div>`;
+    <p class="continue-spot">
+      <span class="continue-spot-label">마지막으로 읽은 곳</span>
+      <span class="continue-spot-empty">${escapeHtml(emptyText || "아직 저장된 읽기 위치가 없습니다.")}</span>
+    </p>`;
 }
 
 const POSITION_GUIDE_KEY = "keepPoint_positionSaveGuideCompact";
@@ -4210,7 +4229,7 @@ function pdfViewerPageUrl(link, restart) {
   const qs = new URLSearchParams();
   qs.set("url", link.url);
   if (restart) qs.set("mode", "restart");
-  return `/pdf-viewer.html?${qs.toString()}`;
+  return pdfViewerHref(qs);
 }
 
 function openPdfViewer(linkId, restart) {

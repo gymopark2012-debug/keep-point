@@ -40,9 +40,8 @@
         <div class="add-box add-box--compact">
           <div class="add-inline">
             <span class="add-prefix" aria-hidden="true">🔗</span>
-            <input id="quickAddInput" type="url" placeholder="URL을 붙여넣으세요" aria-label="URL 붙여넣기" />
-            <button type="button" class="btn" id="quickAddBtn">저장</button>
-            <span class="add-sep" aria-hidden="true">|</span>
+            <input id="quickAddInput" type="url" placeholder="읽을 웹페이지 URL을 붙여넣으세요" aria-label="읽을 웹페이지 URL 붙여넣기" />
+            <button type="button" class="btn" id="quickAddBtn">추가</button>
             <input type="file" id="pdfFileInput" accept="application/pdf" hidden />
             <button type="button" id="pickPdfBtn" class="btn ghost pdf-pick-btn">📄 PDF 불러오기</button>
           </div>
@@ -53,7 +52,7 @@
         <div class="section-header library-header">
           <h2 class="section-title">내 자료</h2>
           <div class="more-wrap">
-            <button type="button" class="more-btn" id="libraryMoreBtn" aria-label="카테고리 관리" aria-expanded="false" aria-haspopup="true">⋯</button>
+            <button type="button" class="more-btn" id="libraryMoreBtn" aria-label="카테고리 관리" aria-expanded="false" aria-haspopup="true">카테고리 관리</button>
             <div class="more-menu hidden" id="libraryMoreMenu" role="menu">
               <button type="button" role="menuitem" id="addCategoryBtn">카테고리 추가</button>
               <button type="button" role="menuitem" class="danger" id="deleteCategoryBtn">선택 카테고리 삭제</button>
@@ -87,7 +86,7 @@
           <input id="categoryNameInput" maxlength="30" placeholder="예: 공부, 논문" />
         </label>
         <menu>
-          <button type="submit" value="cancel" formnovalidate>취소</button>
+          <button type="button" id="cancelCategoryBtn">취소</button>
           <button type="submit" id="saveCategoryBtn" value="default">완료</button>
         </menu>
       </form>

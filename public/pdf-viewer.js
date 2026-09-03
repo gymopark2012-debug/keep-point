@@ -56,23 +56,35 @@
   const deleteAllBtn = document.getElementById("deleteAllBtn");
   const memoPanel = document.getElementById("memoPanel");
   const memoEditor = document.getElementById("memoEditor");
-  const memoSaveBtn = document.getElementById("memoSaveBtn");
-  const memoCancelBtn = document.getElementById("memoCancelBtn");
+  const memoCloseBtn = document.getElementById("memoCloseBtn");
+  const memoDeleteBtn = document.getElementById("memoDeleteBtn");
+  const annPopup = document.getElementById("annPopup");
+  const annPopupNote = document.getElementById("annPopupNote");
+  const annPopupMemo = document.getElementById("annPopupMemo");
+  const annPopupDelete = document.getElementById("annPopupDelete");
+  const undoToast = document.getElementById("undoToast");
+  const undoToastMsg = document.getElementById("undoToastMsg");
+  const undoToastBtn = document.getElementById("undoToastBtn");
 
   const pdfUrlParam = rawUrl ? String(rawUrl).trim() : "";
 
   let pdfSrc = "";
   let localIdMode = false;
   let localMeta = null;
-  let revokeOnHide = null;
+  let localPdfData = null;
   let currentPage = 1;
   let pdfDoc = null;
   let totalPages = 0;
   let currentTool = "pen";
   let annotationsByPage = {};
   let pendingMemo = null;
+  let popupTarget = null;
+  let memoSaveTimer = null;
+  let undoRestore = null;
+  let undoTimer = null;
   let penState = null;
   let livePenPath = null;
+  const UNDO_MS = 4000;
 
   function getStorageKey() {
     if (localIdMode && localId) {
@@ -82,7 +94,26 @@
   }
 
   function indexPageHref() {
-    return "/";
+    return new URL("index.html", window.location.href).href;
+  }
+
+  function readBlobBytes(blob) {
+    if (!blob) {
+      return Promise.reject(new Error("PDF 파일 데이터가 없습니다."));
+    }
+    if (blob instanceof ArrayBuffer) return Promise.resolve(blob);
+    if (ArrayBuffer.isView(blob)) {
+      return Promise.resolve(
+        blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength)
+      );
+    }
+    if (typeof blob.arrayBuffer === "function") return blob.arrayBuffer();
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(fr.error || new Error("PDF 파일을 읽지 못했습니다."));
+      fr.readAsArrayBuffer(blob);
+    });
   }
 
   function isPdfPath(u) {
@@ -137,6 +168,19 @@
       annotationsByPage[key] = [];
     }
     return annotationsByPage[key];
+  }
+
+  function findAnnotation(pageNum, id) {
+    if (!id) return null;
+    return getPageAnnotations(pageNum).find((a) => a.id === id) || null;
+  }
+
+  function annotationHasNote(ann) {
+    return Boolean(String(ann?.note || "").trim());
+  }
+
+  function isUnderlineType(ann) {
+    return Boolean(ann && (ann.type === "pen" || ann.type === "underline" || ann.type === "highlight"));
   }
 
   function getDisplayMetrics() {
@@ -220,28 +264,181 @@
     if (tool !== "memo") closeMemoPanel();
   }
 
+  function closeAnnPopup() {
+    popupTarget = null;
+    annPopup?.classList.add("hidden");
+  }
+
+  function positionAnnPopup(clientX, clientY) {
+    if (!annPopup) return;
+    const pad = 8;
+    annPopup.style.left = "0px";
+    annPopup.style.top = "0px";
+    const rect = annPopup.getBoundingClientRect();
+    let left = clientX;
+    let top = clientY + 12;
+    if (left + rect.width > window.innerWidth - pad) {
+      left = window.innerWidth - rect.width - pad;
+    }
+    if (left < pad) left = pad;
+    if (top + rect.height > window.innerHeight - pad) {
+      top = clientY - rect.height - 12;
+    }
+    if (top < pad) top = pad;
+    annPopup.style.left = `${left}px`;
+    annPopup.style.top = `${top}px`;
+  }
+
+  function openAnnPopup(ann, event) {
+    if (!annPopup || !ann) return;
+    if (memoPanel && !memoPanel.classList.contains("hidden")) {
+      closeMemoPanel();
+    }
+    popupTarget = { id: ann.id, page: currentPage };
+    const hasNote = annotationHasNote(ann);
+    if (annPopupNote) {
+      if (hasNote) {
+        annPopupNote.classList.remove("hidden");
+        annPopupNote.textContent = String(ann.note || "").trim();
+      } else {
+        annPopupNote.classList.add("hidden");
+        annPopupNote.textContent = "";
+      }
+    }
+    if (annPopupMemo) {
+      annPopupMemo.textContent = hasNote ? "메모 보기" : "메모 추가";
+    }
+    const deleteLabel = ann.type === "memo" ? "메모 삭제" : "밑줄 삭제";
+    if (annPopupDelete) {
+      annPopupDelete.title = deleteLabel;
+      annPopupDelete.setAttribute("aria-label", deleteLabel);
+    }
+    annPopup.classList.remove("hidden");
+    positionAnnPopup(event.clientX, event.clientY);
+  }
+
+  function onAnnotationClick(ann, event) {
+    event.stopPropagation();
+    event.preventDefault();
+    openAnnPopup(ann, event);
+  }
+
+  function hideUndoToast() {
+    clearTimeout(undoTimer);
+    undoTimer = null;
+    undoRestore = null;
+    undoToast?.classList.add("hidden");
+  }
+
+  function showUndoToast(message, restoreFn) {
+    clearTimeout(undoTimer);
+    undoRestore = restoreFn;
+    if (undoToastMsg) undoToastMsg.textContent = message;
+    undoToast?.classList.remove("hidden");
+    undoTimer = setTimeout(() => {
+      hideUndoToast();
+    }, UNDO_MS);
+  }
+
+  function runUndo() {
+    const fn = undoRestore;
+    hideUndoToast();
+    if (typeof fn === "function") fn();
+  }
+
+  function restoreAnnotation(page, index, snapshot) {
+    const arr = getPageAnnotations(page);
+    arr.splice(Math.min(index, arr.length), 0, snapshot);
+    persistState();
+    if (page === currentPage) {
+      renderAnnotations();
+      return;
+    }
+    currentPage = page;
+    renderPage().catch((e) => showErr(e));
+  }
+
   function closeMemoPanel() {
+    clearTimeout(memoSaveTimer);
+    memoSaveTimer = null;
+    if (pendingMemo) syncMemoFromEditor();
+    const draft = pendingMemo;
     pendingMemo = null;
     memoPanel?.classList.add("hidden");
     if (memoEditor) memoEditor.value = "";
+    memoDeleteBtn?.classList.add("hidden");
+    if (!draft?.annId) return;
+    const existing = findAnnotation(draft.page, draft.annId);
+    if (!existing) return;
+    if (existing.type === "memo" && !annotationHasNote(existing)) {
+      if (String(draft.originalNote || "").trim()) {
+        existing.note = draft.originalNote;
+        deleteAnnotationWithUndo(existing, draft.page);
+      } else {
+        deleteAnnotationById(existing.id, draft.page);
+      }
+      return;
+    }
+    if (isUnderlineType(existing) && !annotationHasNote(existing) && "note" in existing) {
+      delete existing.note;
+      persistState();
+      renderAnnotations();
+    }
   }
 
   function openMemoPanel(draft) {
-    pendingMemo = draft;
-    if (memoEditor) memoEditor.value = draft.note || "";
+    closeAnnPopup();
+    pendingMemo = { ...draft };
+    if (!pendingMemo.page) pendingMemo.page = currentPage;
+    if (pendingMemo.originalNote == null) {
+      pendingMemo.originalNote = pendingMemo.note || "";
+    }
+    if (memoEditor) memoEditor.value = pendingMemo.note || "";
+    const existing = pendingMemo.annId
+      ? findAnnotation(pendingMemo.page, pendingMemo.annId)
+      : null;
+    memoDeleteBtn?.classList.toggle("hidden", !(existing && annotationHasNote(existing)));
     memoPanel?.classList.remove("hidden");
     memoEditor?.focus();
   }
 
-  function saveMemoFromPanel() {
+  function openMemoForAnnotation(ann, page) {
+    openMemoPanel({
+      page: page ?? currentPage,
+      annId: ann.id,
+      note: ann.note || "",
+      originalNote: ann.note || "",
+      left: ann.left,
+      top: ann.top
+    });
+  }
+
+  function syncMemoFromEditor() {
     if (!pendingMemo) return;
-    const note = String(memoEditor?.value || "").trim();
-    if (!note) {
-      alert("메모 내용을 입력해 주세요.");
+    const note = String(memoEditor?.value || "");
+    const existing = pendingMemo.annId
+      ? findAnnotation(pendingMemo.page, pendingMemo.annId)
+      : null;
+
+    if (existing) {
+      existing.note = note;
+      existing.updatedAt = new Date().toISOString();
+      persistState();
+      if (isUnderlineType(existing) || existing.type === "memo") {
+        renderAnnotations();
+      }
+      if (annotationHasNote(existing)) {
+        memoDeleteBtn?.classList.remove("hidden");
+      } else {
+        memoDeleteBtn?.classList.add("hidden");
+      }
       return;
     }
-    const pageAnns = getPageAnnotations(pendingMemo.page);
-    pageAnns.push({
+
+    if (!String(note).trim()) return;
+    if (pendingMemo.left == null || pendingMemo.top == null) return;
+
+    const created = {
       id: createId("m"),
       type: "memo",
       left: pendingMemo.left,
@@ -249,10 +446,36 @@
       note,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
-    });
-    closeMemoPanel();
+    };
+    getPageAnnotations(pendingMemo.page).push(created);
+    pendingMemo.annId = created.id;
     persistState();
     renderAnnotations();
+    memoDeleteBtn?.classList.remove("hidden");
+  }
+
+  function scheduleMemoSave() {
+    clearTimeout(memoSaveTimer);
+    memoSaveTimer = setTimeout(() => syncMemoFromEditor(), 300);
+  }
+
+  function deleteMemoFromPanel() {
+    if (!pendingMemo?.annId) return;
+    const page = pendingMemo.page;
+    const id = pendingMemo.annId;
+    clearTimeout(memoSaveTimer);
+    memoSaveTimer = null;
+    pendingMemo = null;
+    memoPanel?.classList.add("hidden");
+    if (memoEditor) memoEditor.value = "";
+    memoDeleteBtn?.classList.add("hidden");
+    const existing = findAnnotation(page, id);
+    if (!existing) return;
+    if (isUnderlineType(existing)) {
+      clearNoteWithUndo(existing, page);
+      return;
+    }
+    deleteAnnotationWithUndo(existing, page);
   }
 
   function deleteAnnotationById(id, pageNum) {
@@ -265,6 +488,45 @@
     renderAnnotations();
   }
 
+  function deleteAnnotationWithUndo(ann, pageNum) {
+    const page = pageNum ?? currentPage;
+    const pageAnns = getPageAnnotations(page);
+    const idx = pageAnns.findIndex((a) => a.id === ann.id);
+    if (idx < 0) return;
+    const snapshot = pageAnns[idx];
+    pageAnns.splice(idx, 1);
+    closeAnnPopup();
+    persistState();
+    renderAnnotations();
+    const message = snapshot.type === "memo" ? "메모를 삭제했습니다." : "밑줄을 삭제했습니다.";
+    showUndoToast(message, () => restoreAnnotation(page, idx, snapshot));
+  }
+
+  function clearNoteWithUndo(ann, pageNum) {
+    const page = pageNum ?? currentPage;
+    const live = findAnnotation(page, ann.id);
+    if (!live) return;
+    const previousNote = live.note;
+    if (!String(previousNote || "").trim()) return;
+    delete live.note;
+    live.updatedAt = new Date().toISOString();
+    persistState();
+    renderAnnotations();
+    showUndoToast("메모를 삭제했습니다.", () => {
+      const target = findAnnotation(page, ann.id);
+      if (!target) return;
+      target.note = previousNote;
+      target.updatedAt = new Date().toISOString();
+      persistState();
+      if (page === currentPage) {
+        renderAnnotations();
+        return;
+      }
+      currentPage = page;
+      renderPage().catch((e) => showErr(e));
+    });
+  }
+
   function deleteAllAnnotations() {
     const total = Object.values(annotationsByPage).reduce(
       (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
@@ -275,8 +537,13 @@
       return;
     }
     if (!confirm(`모든 페이지의 밑줄·메모 ${total}개를 전부 삭제할까요?`)) return;
+    closeAnnPopup();
+    hideUndoToast();
+    pendingMemo = null;
+    memoPanel?.classList.add("hidden");
+    if (memoEditor) memoEditor.value = "";
+    memoDeleteBtn?.classList.add("hidden");
     annotationsByPage = {};
-    closeMemoPanel();
     persistState();
     renderAnnotations();
   }
@@ -302,10 +569,8 @@
         hit.setAttribute("class", "pv-pen-hit");
         hit.setAttribute("stroke", "transparent");
         hit.setAttribute("stroke-width", String(strokeW + 14));
-        hit.addEventListener("click", (e) => {
-          e.stopPropagation();
-          deleteAnnotationById(ann.id);
-        });
+        hit.setAttribute("data-ann-id", ann.id);
+        hit.addEventListener("click", (e) => onAnnotationClick(ann, e));
 
         const visible = document.createElementNS("http://www.w3.org/2000/svg", "path");
         visible.setAttribute("d", pathD);
@@ -313,8 +578,23 @@
         visible.setAttribute("class", "pv-highlighter-stroke");
         visible.setAttribute("stroke-width", String(strokeW));
 
+        const titleEl = document.createElementNS("http://www.w3.org/2000/svg", "title");
+        titleEl.textContent = annotationHasNote(ann)
+          ? "클릭해서 메모 보기 또는 삭제"
+          : "클릭해서 메모 추가 또는 삭제";
+
+        g.appendChild(titleEl);
         g.appendChild(hit);
         g.appendChild(visible);
+        if (annotationHasNote(ann) && ann.points[0]) {
+          const start = pointToPx(ann.points[0]);
+          const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          dot.setAttribute("class", "pv-pen-note-dot");
+          dot.setAttribute("cx", String(start.x));
+          dot.setAttribute("cy", String(start.y));
+          dot.setAttribute("r", "6");
+          g.appendChild(dot);
+        }
         annotationSvg.appendChild(g);
       } else if (ann.type === "underline" || ann.type === "highlight") {
         const px = rectToPx(ann);
@@ -325,11 +605,10 @@
         el.style.top = `${px.top}px`;
         el.style.width = `${px.width}px`;
         el.style.height = `${px.height}px`;
-        el.title = "클릭하면 삭제";
-        el.addEventListener("click", (e) => {
-          e.stopPropagation();
-          deleteAnnotationById(ann.id);
-        });
+        el.title = annotationHasNote(ann)
+          ? "클릭해서 메모 보기 또는 삭제"
+          : "클릭해서 메모 추가 또는 삭제";
+        el.addEventListener("click", (e) => onAnnotationClick(ann, e));
         annotationLayer.appendChild(el);
       } else if (ann.type === "memo") {
         const px = pointToPx({ x: ann.left, y: ann.top });
@@ -341,11 +620,8 @@
         el.style.top = `${px.y}px`;
         el.textContent = "M";
         el.dataset.preview = ann.note || "";
-        el.title = `${ann.note || "메모"} (클릭하면 삭제)`;
-        el.addEventListener("click", (e) => {
-          e.stopPropagation();
-          deleteAnnotationById(ann.id);
-        });
+        el.title = `${ann.note || "메모"} — 클릭해서 보기 또는 삭제`;
+        el.addEventListener("click", (e) => onAnnotationClick(ann, e));
         annotationLayer.appendChild(el);
       }
     }
@@ -397,6 +673,7 @@
     if (event.target.closest("[data-ann-id]")) return;
 
     if (currentTool === "pen") {
+      closeAnnPopup();
       syncAnnotationOverlay();
       const { x, y } = layerCoords(event);
       penState = { points: [{ x, y }] };
@@ -405,13 +682,15 @@
       return;
     }
     if (currentTool === "memo") {
+      closeAnnPopup();
       const { x, y } = layerCoords(event);
       const n = normPoint(x, y);
       openMemoPanel({
         page: currentPage,
         left: n.x,
         top: n.y,
-        note: ""
+        note: "",
+        originalNote: ""
       });
       event.preventDefault();
     }
@@ -476,12 +755,63 @@
   toolPen?.addEventListener("click", () => setTool("pen"));
   toolMemo?.addEventListener("click", () => setTool("memo"));
   deleteAllBtn?.addEventListener("click", deleteAllAnnotations);
-  memoSaveBtn?.addEventListener("click", saveMemoFromPanel);
-  memoCancelBtn?.addEventListener("click", closeMemoPanel);
+  memoCloseBtn?.addEventListener("click", closeMemoPanel);
+  memoDeleteBtn?.addEventListener("click", deleteMemoFromPanel);
+  memoEditor?.addEventListener("input", scheduleMemoSave);
+  annPopupMemo?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const target = popupTarget;
+    closeAnnPopup();
+    if (!target) return;
+    const ann = findAnnotation(target.page, target.id);
+    if (!ann) return;
+    openMemoForAnnotation(ann, target.page);
+  });
+  annPopupDelete?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const target = popupTarget;
+    closeAnnPopup();
+    if (!target) return;
+    const ann = findAnnotation(target.page, target.id);
+    if (!ann) return;
+    deleteAnnotationWithUndo(ann, target.page);
+  });
+  undoToastBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    runUndo();
+  });
+  annPopup?.addEventListener("mousedown", (e) => e.stopPropagation());
+  undoToast?.addEventListener("mousedown", (e) => e.stopPropagation());
+  annPopupNote?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const target = popupTarget;
+    closeAnnPopup();
+    if (!target) return;
+    const ann = findAnnotation(target.page, target.id);
+    if (!ann) return;
+    openMemoForAnnotation(ann, target.page);
+  });
 
   annotationLayer.addEventListener("mousedown", onLayerPointerDown);
   window.addEventListener("mousemove", onLayerPointerMove);
   window.addEventListener("mouseup", onLayerPointerUp);
+  pdfScroll?.addEventListener("scroll", () => closeAnnPopup());
+  document.addEventListener("mousedown", (e) => {
+    if (annPopup && !annPopup.classList.contains("hidden")) {
+      if (!annPopup.contains(e.target) && !e.target.closest("[data-ann-id]")) {
+        closeAnnPopup();
+      }
+    }
+    if (memoPanel && !memoPanel.classList.contains("hidden")) {
+      if (memoPanel.contains(e.target) || annPopup?.contains(e.target)) return;
+      if (e.target.closest("[data-ann-id]")) return;
+      if (e.target.closest(".pv-toolbar") || e.target.closest(".pv-header")) {
+        closeMemoPanel();
+        return;
+      }
+      closeMemoPanel();
+    }
+  });
 
   if (typeof ResizeObserver !== "undefined") {
     const overlayResizeObserver = new ResizeObserver(() => {
@@ -499,6 +829,18 @@
   }
 
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (annPopup && !annPopup.classList.contains("hidden")) {
+        e.preventDefault();
+        closeAnnPopup();
+        return;
+      }
+      if (memoPanel && !memoPanel.classList.contains("hidden")) {
+        e.preventDefault();
+        closeMemoPanel();
+        return;
+      }
+    }
     if (isTypingTarget(document.activeElement)) return;
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -514,12 +856,13 @@
       localIdMode = true;
       const rec = await idbGetLocalPdfRecord(localId);
       if (!rec?.blob) {
-        throw new Error("IndexedDB에 PDF가 없습니다. 메인 화면에서 다시 추가해 주세요.");
+        throw new Error("이 기기에 PDF가 없습니다. 메인 화면에서 「PDF 불러오기」로 다시 추가해 주세요.");
       }
       localMeta = rec;
-      const blobUrl = URL.createObjectURL(rec.blob);
-      pdfSrc = blobUrl;
-      revokeOnHide = blobUrl;
+      localPdfData = await readBlobBytes(rec.blob);
+      if (!localPdfData || localPdfData.byteLength < 64) {
+        throw new Error("저장된 PDF가 비어 있습니다. 「PDF 불러오기」로 다시 추가해 주세요.");
+      }
     } else {
       if (!pdfUrlParam || pdfUrlParam.startsWith("blob:")) {
         throw new Error("PDF가 필요합니다. 링크(?url=…pdf) 또는 내 PC PDF는 「이어 읽기」로 열어 주세요.");
@@ -532,21 +875,6 @@
   } catch (e) {
     showErr(e);
     return;
-  }
-
-  if (revokeOnHide) {
-    window.addEventListener(
-      "pagehide",
-      () => {
-        persistState();
-        try {
-          URL.revokeObjectURL(revokeOnHide);
-        } catch {
-          /* ignore */
-        }
-      },
-      { once: true }
-    );
   }
 
   window.addEventListener("beforeunload", () => persistState());
@@ -568,6 +896,7 @@
   async function renderPage() {
     if (!pdfDoc) return;
     currentPage = Math.min(Math.max(1, currentPage), totalPages);
+    closeAnnPopup();
     closeMemoPanel();
     clearLivePen();
     penState = null;
@@ -601,9 +930,8 @@
 
   async function loadPdfArrayBuffer() {
     if (localIdMode) {
-      const res = await fetch(pdfSrc);
-      if (!res.ok) throw new Error(`로컬 PDF를 불러오지 못했습니다. (${res.status})`);
-      return res.arrayBuffer();
+      if (!localPdfData) throw new Error("로컬 PDF를 불러오지 못했습니다.");
+      return localPdfData.slice(0);
     }
 
     if (looksLikeHttpUrl(pdfSrc)) {

@@ -165,6 +165,99 @@ body {
 .pv-memo-pin:hover::after {
   opacity: 1;
 }
+.pv-annotation-svg .pv-pen-note-dot {
+  fill: #2563eb;
+  stroke: #fff;
+  stroke-width: 2;
+  pointer-events: none;
+}
+.pv-ann-popup {
+  position: fixed;
+  z-index: 30;
+  min-width: 168px;
+  max-width: 260px;
+  padding: 8px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  user-select: none;
+}
+.pv-ann-popup-note {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #e2e8f0;
+  max-height: 4.2em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: pointer;
+  user-select: text;
+}
+.pv-ann-popup-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pv-ann-popup-row .btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.pv-icon-btn {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #64748b;
+  background: transparent;
+  color: #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0;
+}
+.pv-icon-btn:hover {
+  border-color: #dc2626;
+  color: #fecaca;
+  background: #7f1d1d;
+}
+.pv-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+  color: #f1f5f9;
+  white-space: nowrap;
+}
+.pv-toast-undo {
+  border: none;
+  background: transparent;
+  color: #93c5fd;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+.pv-toast-undo:hover {
+  color: #bfdbfe;
+  text-decoration: underline;
+}
 .pv-memo-panel {
   position: fixed;
   right: 16px;
@@ -196,6 +289,9 @@ body {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+#memoDeleteBtn {
+  margin-right: auto;
 }
 .pv-error {
   margin: 0;

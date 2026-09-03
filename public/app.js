@@ -3,8 +3,6 @@ const AUTH_KEY = "keepPointAuthV1";
 const USERS_KEY = "keepPointUsersV1";
 const CLOUD_KEY_PREFIX = "keepPointCloudV1_";
 const ALL_CATEGORY = "all";
-const NAVER_OAUTH_STATE_KEY = "keepPoint_naver_oauth_state";
-const AUTH_CONFIG = window.KEEPPOINT_AUTH_CONFIG || { googleClientId: "", naverClientId: "" };
 const AUTH_PROVIDER_LABELS = {
   email: "이메일",
   google: "Google",
@@ -665,10 +663,6 @@ function userIdFromEmail(email) {
   return `email_${normalizeEmail(email).replace(/[^a-z0-9@._-]/gi, "_")}`;
 }
 
-function userIdFromSocial(provider, socialId) {
-  return `${provider}_${String(socialId).replace(/[^a-z0-9._-]/gi, "_")}`;
-}
-
 async function hashPassword(password, salt) {
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
@@ -728,30 +722,6 @@ async function loginEmailUser({ email, password }) {
   return user;
 }
 
-function upsertSocialUser({ provider, email, name, socialId }) {
-  const userId = userIdFromSocial(provider, socialId);
-  const users = loadUsers();
-  let user = users.find((u) => u.userId === userId);
-  const normalizedEmail = normalizeEmail(email) || `${userId}@${provider}.user`;
-  if (!user) {
-    user = {
-      userId,
-      email: normalizedEmail,
-      name: String(name || "").trim() || `${AUTH_PROVIDER_LABELS[provider] || provider} 사용자`,
-      provider,
-      socialId: String(socialId),
-      createdAt: new Date().toISOString()
-    };
-    users.push(user);
-  } else {
-    user.email = normalizedEmail;
-    user.name = String(name || "").trim() || user.name;
-    user.socialId = String(socialId);
-  }
-  saveUsers(users);
-  return user;
-}
-
 function loadAuth() {
   try {
     const raw = localStorage.getItem(AUTH_KEY);
@@ -777,28 +747,6 @@ function loadAuth() {
 function saveAuth() {
   localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
 }
-
-function parseJwtPayload(token) {
-  const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-  const json = atob(base64);
-  return JSON.parse(json);
-}
-
-function captureNaverOAuthReturn() {
-  const hash = window.location.hash || "";
-  if (!hash.includes("access_token=")) return null;
-  const params = new URLSearchParams(hash.slice(1));
-  const token = params.get("access_token");
-  const state = params.get("state");
-  const expected = sessionStorage.getItem(NAVER_OAUTH_STATE_KEY);
-  if (!token || !state || state !== expected) return null;
-  sessionStorage.removeItem(NAVER_OAUTH_STATE_KEY);
-  const cleanUrl = `${window.location.pathname}${window.location.search}`;
-  history.replaceState(null, "", cleanUrl);
-  return token;
-}
-
-const bootOAuthToken = captureNaverOAuthReturn();
 
 function getSavedItemCount() {
   return (Array.isArray(state.links) ? state.links.length : 0) + (Array.isArray(state.localPdfs) ? state.localPdfs.length : 0);
@@ -2533,15 +2481,11 @@ const authSignupPanel = document.getElementById("authSignupPanel");
 const loginEmailInput = document.getElementById("loginEmailInput");
 const loginPasswordInput = document.getElementById("loginPasswordInput");
 const signupNameInput = document.getElementById("signupNameInput");
-const signupEmailInput = document.getElementById("signupEmailInput");
-const signupPasswordInput = document.getElementById("signupPasswordInput");
 const signupPasswordConfirmInput = document.getElementById("signupPasswordConfirmInput");
 const authPrimaryBtn = document.getElementById("authPrimaryBtn");
 const authErrorText = document.getElementById("authErrorText");
-const googleLoginBtn = document.getElementById("googleLoginBtn");
-const naverLoginBtn = document.getElementById("naverLoginBtn");
-const oauthSetupHelpBtn = document.getElementById("oauthSetupHelpBtn");
-const oauthSetupModal = document.getElementById("oauthSetupModal");
+const authSwitchBtn = document.getElementById("authSwitchBtn");
+const authSwitchLead = document.getElementById("authSwitchLead");
 const profileModal = document.getElementById("profileModal");
 const profileStatusText = document.getElementById("profileStatusText");
 const profileNameInput = document.getElementById("profileNameInput");
@@ -2549,6 +2493,9 @@ const profileEmailInput = document.getElementById("profileEmailInput");
 const profileProviderInput = document.getElementById("profileProviderInput");
 const deleteAccountBtn = document.getElementById("deleteAccountBtn");
 let authModalMode = "login";
+let authBusy = false;
+let authBusySource = "";
+let authReturnView = null;
 let detailPanelOpen = false;
 const guestNotice = document.getElementById("guestNotice");
 const syncAcrossDevicesBtn = document.getElementById("syncAcrossDevicesBtn");
@@ -2636,21 +2583,19 @@ if (categoryForm) categoryForm.addEventListener("submit", onCategoryFormSubmit);
 if (openLoginBtn) openLoginBtn.addEventListener("click", () => openLoginModal("manual"));
 if (openProfileBtn) openProfileBtn.addEventListener("click", openProfileModal);
 if (loginForm) loginForm.addEventListener("submit", onAuthFormSubmit);
-if (googleLoginBtn) googleLoginBtn.addEventListener("click", onGoogleLoginClick);
-if (naverLoginBtn) naverLoginBtn.addEventListener("click", onNaverLoginClick);
-if (oauthSetupHelpBtn) oauthSetupHelpBtn.addEventListener("click", openOAuthSetupGuide);
-for (const copyBtn of document.querySelectorAll(".oauth-copy-btn")) {
-  copyBtn.addEventListener("click", () => {
-    const target = document.getElementById(copyBtn.dataset.copyTarget || "");
-    if (!target) return;
-    navigator.clipboard?.writeText(target.textContent || "").then(
-      () => alert("복사했습니다."),
-      () => alert(target.textContent || "")
-    );
+if (loginModal) {
+  loginModal.addEventListener("close", () => {
+    setAuthBusy(false);
   });
 }
-for (const tabBtn of document.querySelectorAll("[data-auth-tab]")) {
-  tabBtn.addEventListener("click", () => setAuthModalMode(tabBtn.dataset.authTab));
+if (authSwitchBtn) {
+  authSwitchBtn.addEventListener("click", () => {
+    if (authBusy) return;
+    setAuthModalMode(authModalMode === "signup" ? "login" : "signup");
+  });
+}
+for (const toggleBtn of document.querySelectorAll("[data-password-toggle]")) {
+  toggleBtn.addEventListener("click", () => togglePasswordVisibility(toggleBtn));
 }
 if (deleteAccountBtn) deleteAccountBtn.addEventListener("click", onDeleteAccount);
 if (syncAcrossDevicesBtn) syncAcrossDevicesBtn.addEventListener("click", onSyncAcrossDevicesClick);
@@ -2817,6 +2762,19 @@ function onCreateShareLinkClick() {
   shareLink(link.id);
 }
 
+function friendlyAuthError(err, fallback) {
+  const raw = String(err?.message || err || "").trim();
+  if (!raw) return fallback || "로그인 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.";
+  if (raw.includes("이메일과 비밀번호를 입력")) return "이메일과 비밀번호를 입력해 주세요.";
+  if (raw.includes("6자")) return "비밀번호는 6자 이상이어야 합니다.";
+  if (raw.includes("이미 가입")) return "이미 가입된 이메일입니다.";
+  if (raw.includes("비밀번호 확인")) return "비밀번호 확인이 일치하지 않습니다.";
+  if (raw.includes("가입되지 않은") || raw.includes("비밀번호가 올바르지") || raw.includes("소셜 로그인 계정")) {
+    return "이메일 또는 비밀번호를 확인해주세요.";
+  }
+  return fallback || "로그인 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.";
+}
+
 function setAuthError(message) {
   if (!authErrorText) return;
   if (!message) {
@@ -2828,42 +2786,109 @@ function setAuthError(message) {
   authErrorText.classList.remove("hidden");
 }
 
+function setAuthBusy(busy, source) {
+  authBusy = Boolean(busy);
+  authBusySource = authBusy ? (source || "") : "";
+  const primaryIdle = authModalMode === "signup" ? "회원가입" : "로그인";
+  const primaryBusy = authModalMode === "signup" ? "가입 중..." : "로그인 중...";
+  const primaryLabel = authBusy ? primaryBusy : primaryIdle;
+
+  if (authPrimaryBtn) {
+    authPrimaryBtn.disabled = authBusy;
+    authPrimaryBtn.textContent = primaryLabel;
+    authPrimaryBtn.classList.toggle("is-loading", authBusy);
+  }
+  if (authSwitchBtn) authSwitchBtn.disabled = authBusy;
+  if (loginEmailInput) loginEmailInput.disabled = authBusy;
+  if (loginPasswordInput) loginPasswordInput.disabled = authBusy;
+  if (signupNameInput) signupNameInput.disabled = authBusy;
+  if (signupPasswordConfirmInput) signupPasswordConfirmInput.disabled = authBusy;
+  if (loginForm) loginForm.setAttribute("aria-busy", authBusy ? "true" : "false");
+}
+
+function togglePasswordVisibility(toggleBtn) {
+  const inputId = toggleBtn?.dataset?.passwordToggle;
+  const input = inputId ? document.getElementById(inputId) : null;
+  if (!input) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  toggleBtn.setAttribute("aria-pressed", show ? "true" : "false");
+  toggleBtn.setAttribute("aria-label", show ? "비밀번호 숨기기" : "비밀번호 표시");
+}
+
 function setAuthModalMode(mode) {
   authModalMode = mode === "signup" ? "signup" : "login";
-  for (const tabBtn of document.querySelectorAll("[data-auth-tab]")) {
-    tabBtn.classList.toggle("active", tabBtn.dataset.authTab === authModalMode);
+  for (const el of document.querySelectorAll(".auth-signup-only")) {
+    el.classList.toggle("hidden", authModalMode !== "signup");
   }
-  authLoginPanel?.classList.toggle("hidden", authModalMode !== "login");
-  authSignupPanel?.classList.toggle("hidden", authModalMode !== "signup");
-  if (authPrimaryBtn) authPrimaryBtn.textContent = authModalMode === "signup" ? "회원가입" : "로그인";
+  if (authLoginPanel) authLoginPanel.classList.remove("hidden");
+  if (authSignupPanel) authSignupPanel.classList.toggle("hidden", authModalMode !== "signup");
+  if (authPrimaryBtn && !authBusy) authPrimaryBtn.textContent = authModalMode === "signup" ? "회원가입" : "로그인";
+  if (loginPasswordInput) {
+    loginPasswordInput.autocomplete = authModalMode === "signup" ? "new-password" : "current-password";
+    if (authModalMode === "signup") loginPasswordInput.placeholder = "6자 이상";
+    else loginPasswordInput.placeholder = "비밀번호";
+  }
+  if (authSwitchLead) {
+    authSwitchLead.textContent = authModalMode === "signup" ? "이미 계정이 있나요?" : "계정이 없나요?";
+  }
+  if (authSwitchBtn) {
+    authSwitchBtn.textContent = authModalMode === "signup" ? "로그인" : "회원가입";
+  }
   setAuthError("");
+  if (loginModal?.open) {
+    if (authModalMode === "signup") signupNameInput?.focus();
+    else loginEmailInput?.focus();
+  }
 }
 
 function resetAuthFormFields() {
-  if (loginEmailInput) loginEmailInput.value = auth.email || "";
+  if (loginEmailInput) {
+    if (auth.isLoggedIn) loginEmailInput.value = auth.email || "";
+  }
   if (loginPasswordInput) loginPasswordInput.value = "";
   if (signupNameInput) signupNameInput.value = "";
-  if (signupEmailInput) signupEmailInput.value = "";
-  if (signupPasswordInput) signupPasswordInput.value = "";
   if (signupPasswordConfirmInput) signupPasswordConfirmInput.value = "";
+  for (const toggleBtn of document.querySelectorAll("[data-password-toggle]")) {
+    const input = document.getElementById(toggleBtn.dataset.passwordToggle || "");
+    if (input) input.type = "password";
+    toggleBtn.setAttribute("aria-pressed", "false");
+    toggleBtn.setAttribute("aria-label", "비밀번호 표시");
+  }
   setAuthError("");
+}
+
+function snapshotAuthReturnView() {
+  authReturnView = {
+    selectedLinkId: state.ui?.selectedLinkId || null,
+    detailPanelOpen: Boolean(detailPanelOpen)
+  };
+}
+
+function restoreAuthReturnView() {
+  const ctx = authReturnView;
+  authReturnView = null;
+  if (!ctx) return;
+  if (ctx.selectedLinkId && ctx.detailPanelOpen) {
+    const link = (state.links || []).find((item) => item.id === ctx.selectedLinkId);
+    if (link) {
+      selectLink(link.id, { openDetail: true });
+      return;
+    }
+  }
+  if (!ctx.detailPanelOpen) closeDetailPanel();
 }
 
 function openLoginModal(reason) {
   if (!loginModal) return;
-  const reasonMap = {
-    limit: "읽던 위치를 계속 보관하려면 로그인하세요.",
-    sync: "로그인하면 다른 기기에서도 이어 읽을 수 있어요.",
-    extension: "Chrome Extension 연동은 로그인 후 사용할 수 있어요.",
-    "ai-summary": "AI 요약 저장은 로그인 후 사용할 수 있어요.",
-    "share-link": "공유 링크 만들기는 로그인 후 사용할 수 있어요.",
-    manual: "이메일로 로그인하거나 회원가입·간편 로그인을 이용하세요."
-  };
-  const msg = reasonMap[reason] || reasonMap.manual;
-  if (loginHelperText) loginHelperText.textContent = msg;
+  snapshotAuthReturnView();
+  if (loginHelperText) loginHelperText.textContent = "읽던 자료를 그대로 이어보세요.";
+  setAuthBusy(false);
   setAuthModalMode("login");
   resetAuthFormFields();
   loginModal.showModal();
+  if (loginEmailInput && !loginEmailInput.value) loginEmailInput.focus();
+  else loginPasswordInput?.focus();
 }
 
 async function migrateGuestDataToUser(userId) {
@@ -2904,18 +2929,21 @@ async function completeLoginFromUser(user) {
   await migrateGuestDataToUser(user.userId);
   state.profile.name = user.name;
   saveAndRender();
+  setAuthBusy(false);
   if (loginModal?.open) loginModal.close();
+  restoreAuthReturnView();
 }
 
 async function onAuthFormSubmit(event) {
   if (event.submitter?.value === "cancel") return;
   event.preventDefault();
+  if (authBusy) return;
   setAuthError("");
+  const email = String(loginEmailInput?.value || "").trim();
+  const password = String(loginPasswordInput?.value || "");
   try {
     if (authModalMode === "signup") {
       const name = String(signupNameInput?.value || "").trim();
-      const email = String(signupEmailInput?.value || "").trim();
-      const password = String(signupPasswordInput?.value || "");
       const confirm = String(signupPasswordConfirmInput?.value || "");
       if (!email || !password) {
         setAuthError("이메일과 비밀번호를 입력해 주세요.");
@@ -2925,132 +2953,22 @@ async function onAuthFormSubmit(event) {
         setAuthError("비밀번호 확인이 일치하지 않습니다.");
         return;
       }
+      setAuthBusy(true, "email");
       const user = await registerEmailUser({ name, email, password });
       await completeLoginFromUser(user);
       return;
     }
-    const email = String(loginEmailInput?.value || "").trim();
-    const password = String(loginPasswordInput?.value || "");
     if (!email || !password) {
       setAuthError("이메일과 비밀번호를 입력해 주세요.");
       return;
     }
+    setAuthBusy(true, "email");
     const user = await loginEmailUser({ email, password });
     await completeLoginFromUser(user);
   } catch (err) {
-    setAuthError(err?.message || "로그인에 실패했습니다.");
+    setAuthBusy(false);
+    setAuthError(friendlyAuthError(err));
   }
-}
-
-function getOAuthRedirectUri() {
-  return `${window.location.origin}${window.location.pathname}`;
-}
-
-function isOAuthSupportedOrigin() {
-  return window.location.protocol === "http:" || window.location.protocol === "https:";
-}
-
-function openOAuthSetupGuide() {
-  if (!oauthSetupModal) return;
-  const origin = isOAuthSupportedOrigin() ? window.location.origin : "http://localhost:3000";
-  const callback = isOAuthSupportedOrigin()
-    ? getOAuthRedirectUri()
-    : "http://localhost:3000/index.html";
-  const example = `${origin}/index.html`;
-  const originEl = document.getElementById("oauthGoogleOrigin");
-  const callbackEl = document.getElementById("oauthNaverCallback");
-  const exampleEl = document.getElementById("oauthExampleUrl");
-  if (originEl) originEl.textContent = origin;
-  if (callbackEl) callbackEl.textContent = callback;
-  if (exampleEl) exampleEl.textContent = example;
-  oauthSetupModal.showModal();
-}
-
-function onGoogleLoginClick() {
-  setAuthError("");
-  if (!isOAuthSupportedOrigin()) {
-    setAuthError("파일로 직접 열면 Google 로그인이 되지 않습니다. 로컬 서버로 실행해 주세요.");
-    openOAuthSetupGuide();
-    return;
-  }
-  const clientId = String(AUTH_CONFIG.googleClientId || "").trim();
-  if (!clientId) {
-    setAuthError("auth-config.js에 googleClientId를 입력해 주세요. (설정 방법 버튼 참고)");
-    openOAuthSetupGuide();
-    return;
-  }
-  if (!window.google?.accounts?.oauth2) {
-    setAuthError("Google 로그인 스크립트를 불러오는 중입니다. 잠시 후 다시 시도해 주세요.");
-    return;
-  }
-  const client = window.google.accounts.oauth2.initTokenClient({
-    client_id: clientId,
-    scope: "openid email profile",
-    callback: async (tokenResponse) => {
-      if (tokenResponse.error) {
-        setAuthError("Google 로그인이 취소되었거나 실패했습니다.");
-        return;
-      }
-      try {
-        const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-          headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
-        });
-        if (!res.ok) throw new Error("Google 프로필을 가져오지 못했습니다.");
-        const profile = await res.json();
-        const user = upsertSocialUser({
-          provider: "google",
-          email: profile.email,
-          name: profile.name,
-          socialId: profile.sub
-        });
-        await completeLoginFromUser(user);
-      } catch (err) {
-        setAuthError(err?.message || "Google 로그인에 실패했습니다.");
-      }
-    }
-  });
-  client.requestAccessToken();
-}
-
-function onNaverLoginClick() {
-  setAuthError("");
-  if (!isOAuthSupportedOrigin()) {
-    setAuthError("파일로 직접 열면 네이버 로그인이 되지 않습니다. 로컬 서버로 실행해 주세요.");
-    openOAuthSetupGuide();
-    return;
-  }
-  const clientId = String(AUTH_CONFIG.naverClientId || "").trim();
-  if (!clientId) {
-    setAuthError("auth-config.js에 naverClientId를 입력해 주세요. (설정 방법 버튼 참고)");
-    openOAuthSetupGuide();
-    return;
-  }
-  const state = crypto.randomUUID();
-  sessionStorage.setItem(NAVER_OAUTH_STATE_KEY, state);
-  const redirectUri = getOAuthRedirectUri();
-  const url = new URL("https://nid.naver.com/oauth2.0/authorize");
-  url.searchParams.set("response_type", "token");
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("state", state);
-  window.location.href = url.toString();
-}
-
-async function completeNaverLogin(accessToken) {
-  const res = await fetch("https://openapi.naver.com/v1/nid/me", {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  if (!res.ok) throw new Error("네이버 프로필을 가져오지 못했습니다.");
-  const data = await res.json();
-  if (data.resultcode !== "00") throw new Error("네이버 로그인에 실패했습니다.");
-  const profile = data.response || {};
-  const user = upsertSocialUser({
-    provider: "naver",
-    email: profile.email || `naver_${profile.id}@naver.user`,
-    name: profile.name || profile.nickname || "네이버 사용자",
-    socialId: profile.id
-  });
-  await completeLoginFromUser(user);
 }
 
 function maybePromptLoginByLimit(previousCount) {
@@ -4320,13 +4238,6 @@ function resumePendingSnapshots() {
 
 async function bootApp() {
   installReadingSessionListeners();
-  if (bootOAuthToken) {
-    try {
-      await completeNaverLogin(bootOAuthToken);
-    } catch (err) {
-      alert(err?.message || "네이버 로그인에 실패했습니다.");
-    }
-  }
   const selectParam = new URLSearchParams(window.location.search).get("select");
   if (selectParam && state.links.some((l) => l.id === selectParam)) {
     state.ui.selectedLinkId = selectParam;

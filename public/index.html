@@ -125,13 +125,17 @@
     </dialog>
 
     <dialog id="loginModal" class="auth-dialog">
-      <form method="dialog" id="loginForm">
-        <h3>KeepPoint</h3>
-        <p class="meta" id="loginHelperText">읽던 위치를 계속 보관하려면 로그인하세요.</p>
+      <form method="dialog" id="loginForm" class="auth-form">
+        <div class="auth-header">
+          <h3 id="authTitle">Keep-Point 시작하기</h3>
+          <p class="meta" id="loginHelperText">읽던 자료를 그대로 이어보세요.</p>
+        </div>
 
-        <div class="auth-tabs" role="tablist">
-          <button type="button" class="auth-tab active" data-auth-tab="login" role="tab">로그인</button>
-          <button type="button" class="auth-tab" data-auth-tab="signup" role="tab">회원가입</button>
+        <div id="authSignupPanel" class="auth-panel auth-signup-only hidden">
+          <label>
+            이름
+            <input id="signupNameInput" maxlength="30" placeholder="이름" autocomplete="name" />
+          </label>
         </div>
 
         <div id="authLoginPanel" class="auth-panel">
@@ -141,88 +145,33 @@
           </label>
           <label>
             비밀번호
-            <input id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="비밀번호" />
+            <span class="password-field">
+              <input id="loginPasswordInput" type="password" autocomplete="current-password" placeholder="비밀번호" />
+              <button type="button" class="password-toggle" data-password-toggle="loginPasswordInput" aria-label="비밀번호 표시" aria-pressed="false"></button>
+            </span>
           </label>
         </div>
 
-        <div id="authSignupPanel" class="auth-panel hidden">
-          <label>
-            이름
-            <input id="signupNameInput" maxlength="30" placeholder="이름" />
-          </label>
-          <label>
-            이메일
-            <input id="signupEmailInput" type="email" autocomplete="username" placeholder="name@example.com" />
-          </label>
-          <label>
-            비밀번호
-            <input id="signupPasswordInput" type="password" autocomplete="new-password" placeholder="6자 이상" />
-          </label>
+        <div class="auth-panel auth-signup-only hidden">
           <label>
             비밀번호 확인
-            <input id="signupPasswordConfirmInput" type="password" autocomplete="new-password" placeholder="비밀번호 다시 입력" />
+            <span class="password-field">
+              <input id="signupPasswordConfirmInput" type="password" autocomplete="new-password" placeholder="비밀번호 다시 입력" />
+              <button type="button" class="password-toggle" data-password-toggle="signupPasswordConfirmInput" aria-label="비밀번호 표시" aria-pressed="false"></button>
+            </span>
           </label>
-        </div>
-
-        <div class="auth-social">
-          <p class="auth-divider"><span>또는</span></p>
-          <button type="button" id="googleLoginBtn" class="auth-social-btn google">Google로 계속</button>
-          <button type="button" id="naverLoginBtn" class="auth-social-btn naver">네이버로 계속</button>
-          <button type="button" id="oauthSetupHelpBtn" class="auth-setup-link">간편 로그인이 안 되나요? 설정 방법</button>
         </div>
 
         <p id="authErrorText" class="auth-error hidden" role="alert"></p>
 
-        <menu>
-          <button type="submit" value="cancel" formnovalidate>취소</button>
-          <button type="submit" id="authPrimaryBtn" value="default">로그인</button>
-        </menu>
-      </form>
-    </dialog>
+        <button type="submit" id="authPrimaryBtn" class="auth-submit-btn" value="default">로그인</button>
 
-    <dialog id="oauthSetupModal" class="auth-dialog oauth-setup-dialog">
-      <form method="dialog">
-        <h3>Google · 네이버 간편 로그인 설정</h3>
-        <p class="meta oauth-setup-lead">간편 로그인은 <strong>개발자 콘솔 등록</strong>과 <strong>로컬 서버 실행</strong>이 필요합니다. 파일을 더블클릭해서 열면 동작하지 않습니다.</p>
+        <p class="auth-switch" id="authSwitchRow">
+          <span id="authSwitchLead">계정이 없나요?</span>
+          <button type="button" id="authSwitchBtn" class="auth-switch-btn">회원가입</button>
+        </p>
 
-        <section class="oauth-setup-block">
-          <h4>0. 먼저 로컬 서버로 실행</h4>
-          <p class="meta">프로젝트 폴더에서 아래 중 하나를 실행한 뒤, 표시된 주소로 접속하세요.</p>
-          <pre class="oauth-code">npx --yes serve .
-# 또는
-python -m http.server 8080</pre>
-          <p class="meta">접속 주소 예: <code id="oauthExampleUrl">http://localhost:3000/index.html</code></p>
-        </section>
-
-        <section class="oauth-setup-block">
-          <h4>1. auth-config.js 에 ID 입력</h4>
-          <p class="meta">프로젝트의 <code>auth-config.js</code> 파일을 열고 발급받은 ID를 넣은 뒤 저장·새로고침하세요.</p>
-        </section>
-
-        <section class="oauth-setup-block">
-          <h4>2. Google 설정</h4>
-          <ol class="oauth-steps">
-            <li><a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Google Cloud Console</a> → OAuth 클라이언트 ID → <strong>웹 애플리케이션</strong></li>
-            <li>승인된 JavaScript 원본에 아래 주소를 <strong>그대로</strong> 추가</li>
-          </ol>
-          <p class="oauth-copy-row"><code id="oauthGoogleOrigin">http://localhost:3000</code> <button type="button" class="btn ghost oauth-copy-btn" data-copy-target="oauthGoogleOrigin">복사</button></p>
-          <p class="meta">발급된 클라이언트 ID → <code>googleClientId</code></p>
-        </section>
-
-        <section class="oauth-setup-block">
-          <h4>3. 네이버 설정</h4>
-          <ol class="oauth-steps">
-            <li><a href="https://developers.naver.com/apps/" target="_blank" rel="noreferrer">네이버 개발자센터</a> → 애플리케이션 → API 설정 → <strong>네이버 로그인</strong> 사용</li>
-            <li>서비스 URL: 위와 같은 <strong>원본 주소</strong> (경로 제외)</li>
-            <li>Callback URL: 아래 주소를 <strong>그대로</strong> 등록</li>
-          </ol>
-          <p class="oauth-copy-row"><code id="oauthNaverCallback">http://localhost:3000/index.html</code> <button type="button" class="btn ghost oauth-copy-btn" data-copy-target="oauthNaverCallback">복사</button></p>
-          <p class="meta">Client ID → <code>naverClientId</code></p>
-        </section>
-
-        <p class="meta oauth-setup-note">배포 후에는 실제 도메인(예: https://your-site.com)으로 같은 항목을 추가해야 합니다.</p>
-
-        <menu>
+        <menu class="auth-dialog-menu">
           <button type="submit" value="cancel" formnovalidate>닫기</button>
         </menu>
       </form>
@@ -251,8 +200,6 @@ python -m http.server 8080</pre>
       </form>
     </dialog>
 
-    <script src="./auth-config.js"></script>
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script src="./app.js"></script>
   </body>
 </html>
